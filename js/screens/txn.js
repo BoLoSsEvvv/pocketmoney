@@ -119,6 +119,22 @@ export class EditTxnScreen extends Screen {
     document.activeElement?.blur?.();
   }
 
+  // Перевод между валютами: пишешь в одно поле — другое сразу пересчитывается по курсу
+  syncXfer(src, cents) {
+    const d = this.d;
+    if (!this.toAmtInput || cents == null) return; // нет поля «Зачислено» или выражение ещё не дописано
+    cents = Math.abs(cents);
+    if (src === 'amount') {
+      d.amount = cents;
+      d.toAmount = null; // посчитается по курсу при сохранении
+      this.toAmtInput.value = amountInput(M.convert(cents, d.acc, d.to));
+    } else {
+      d.toAmount = cents;
+      d.amount = M.convert(cents, d.to, d.acc);
+      this.amountInputEl.value = amountInput(d.amount);
+    }
+  }
+
   setType(v) {
     const d = this.d;
     if (v === 't') {
@@ -221,13 +237,11 @@ export class EditTxnScreen extends Screen {
         : null;
       amtCell = amountCell(t('Сумма'), d.amount, (v) => {
         this.touched.amount = true;
-        this.amtFromTo = false;
         if (v < 0 && d.type !== 't') { d.type = d.type === 'w' ? 'd' : 'w'; v = -v; d.amount = v; this.render(); return; }
         d.amount = Math.abs(v);
         if (d.fAmt && d.fRate) d.fAmt = Math.round(d.amount / d.fRate);
-        // «Зачислено» не вводили вручную — пересчитываем по курсу
-        if (this.toAmtInput && d.toAmount == null) this.toAmtInput.value = amountInput(M.convert(d.amount, d.acc, d.to));
-      }, { right: rateBtn, onInput: () => (this.touched.amount = true) });
+        this.syncXfer('amount', d.amount);
+      }, { right: rateBtn, onInput: (v) => { this.touched.amount = true; this.syncXfer('amount', v.trim() ? evalAmount(v) : 0); } });
       this.amountInputEl = amtCell.input;
     }
 
@@ -241,15 +255,10 @@ export class EditTxnScreen extends Screen {
       const to = M.account(d.to);
       if (multi && to && M.curOf(to) !== M.curOf(acc)) {
         const toAmt = d.toAmount ?? M.convert(d.amount, d.acc, d.to);
-        const toCell = amountCell(t('Зачислено'), toAmt, (v) => {
-          d.toAmount = Math.abs(v);
-          // Сумма не введена (или сама посчитана отсюда) — считаем её обратно по курсу
-          if (!d.amount || this.amtFromTo) {
-            d.amount = M.convert(d.toAmount, d.to, d.acc);
-            this.amtFromTo = true;
-            if (this.amountInputEl) this.amountInputEl.value = amountInput(d.amount);
-          }
-        }, { right: h('span', { class: 'muted' }, M.curOf(to)) });
+        const toCell = amountCell(t('Зачислено'), toAmt, (v) => this.syncXfer('to', v), {
+          right: h('span', { class: 'muted' }, M.curOf(to)),
+          onInput: (v) => this.syncXfer('to', v.trim() ? evalAmount(v) : 0),
+        });
         this.toAmtInput = toCell.input;
         first.push(toCell);
       }
