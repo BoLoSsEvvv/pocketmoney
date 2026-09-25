@@ -35,7 +35,7 @@ export async function deliverFile(name, text, mime = 'text/plain') {
     } catch { toast(t('Не удалось скачать файл')); return false; }
   }]);
   opts.push([t('Скопировать как текст'), copy]);
-  const i = await actionSheet({ title: `${name} (${Math.ceil(text.length / 1024)} КБ)`, buttons: opts.map(([label]) => ({ label })) });
+  const i = await actionSheet({ title: `${name} (${Math.ceil(text.length / 1024)} ${t('КБ')})`, buttons: opts.map(([label]) => ({ label })) });
   return i != null && !!(await opts[i][1]());
 }
 

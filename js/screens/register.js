@@ -26,7 +26,7 @@ export function entrySubline(e) {
     if (x.splits?.length && e.dir === 'out') parts.push(t('<--сплит-->'));
     else if (x.category) parts.push(x.category);
   }
-  if (f.num && x.num) parts.push('№ ' + x.num);
+  if (f.num && x.num) parts.push(t('№ {0}', x.num));
   if (f.cls && x.cls) parts.push(x.cls);
   if (f.memo && x.memo) parts.push(x.memo);
   return parts.join(' • ');
@@ -52,7 +52,7 @@ export class RegisterScreen extends Screen {
     return {
       title: this.title || (this.acc ? M.accName(this.acc) : this.filter?.name || t('Все операции')),
       left: backButton(this.back || t('Счета')),
-      right: { icon: 'search', onClick: () => { this.searchOpen = !this.searchOpen; if (!this.searchOpen) this.q = ''; this.render(); if (this.searchOpen) setTimeout(() => this.searchInput?.focus(), 50); } },
+      right: { icon: 'search', onClick: () => { this.searchOpen = !this.searchOpen; if (!this.searchOpen) this.q = ''; this.render(); if (this.searchOpen) this.searchInput?.focus(); } },
       sub: this.searchOpen ? this.searchBar() : null,
     };
   }

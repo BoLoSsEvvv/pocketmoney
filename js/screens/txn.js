@@ -220,7 +220,7 @@ export class EditTxnScreen extends Screen {
       const list = M.state.payees.filter((p) => p.toLowerCase().includes(q) && p.toLowerCase() !== q).slice(0, 6);
       sugg.replaceChildren(...list.map((p) => h('div', {
         onpointerdown: (e) => e.preventDefault(),
-        onclick: () => { d.payee = p; this.applyAuto(p); this.render(); },
+        onclick: () => { d.payee = c.input.value = p; this.applyAuto(p); this.render(); },
       }, p)));
     };
     const c = inputCell({
