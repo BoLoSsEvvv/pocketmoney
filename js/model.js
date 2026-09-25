@@ -258,7 +258,8 @@ function normalize(d) {
     x.amount = -Math.abs(x.amount);
     x.toCleared = !!x.cleared; // перевод проводится сразу на обоих счетах
     const acc = account(x.acc), to = account(x.to);
-    if (!state.settings.multiCur || curOf(acc) === curOf(to) || x.toAmount == null) x.toAmount = convert(-x.amount, x.acc, x.to);
+    if (!state.settings.multiCur || curOf(acc) === curOf(to)) x.toAmount = -x.amount; // одна валюта — без курса
+    else if (x.toAmount == null) x.toAmount = convert(-x.amount, x.acc, x.to);
     else x.toAmount = Math.abs(x.toAmount);
   } else if (x.splits?.length) {
     x.amount = x.splits.reduce((a, s) => a + s.amount, 0);
@@ -488,6 +489,13 @@ export function applyRepeat(x, rule, existingId) {
     return null;
   }
   return r;
+}
+
+// «Эту и все будущие»: новый шаблон + уже созданные наперёд операции (дата, отметки и id — свои)
+export function applyToFuture(r, x) {
+  r.tpl = templateOf(x);
+  state.txns = state.txns.map((y) => (y.rep !== r.id || y.id === x.id || y.date <= x.date ? y
+    : { ...clone(r.tpl), id: y.id, seq: y.seq, date: y.date, rep: r.id, cleared: y.cleared, toCleared: y.toCleared, mod: Date.now() }));
 }
 
 export const normalizeTxn = (d) => normalize(d);
