@@ -133,8 +133,24 @@ class CurrencyScreen extends PinScreen {
       group([
         cell({ label: t('Основная'), value: `${s.home} — ${currencyName(s.home)}`, onClick: () => push(new CurrencyPicker(s.home, (v) => {
           const old = s.home;
+          if (v === old) return;
           s.home = v;
-          for (const a of M.state.accounts) if (!a.currency || a.currency === old && !s.multiCur) { a.currency = v; a.rate = 1; }
+          if (!s.multiCur) {
+            for (const a of M.state.accounts) if (!a.currency || a.currency === old) { a.currency = v; a.rate = 1; }
+          } else {
+            // курсы были к старой валюте: делим на курс новой (старая → 1 / курс новой)
+            const k = M.state.accounts.find((a) => a.currency === v)?.rate;
+            for (const a of M.state.accounts) {
+              a.currency ||= old;
+              if (a.currency === v) a.rate = 1;
+              else if (k) a.rate = +((a.currency === old ? 1 : a.rate || 1) / k).toPrecision(10);
+            }
+            if (!k) {
+              toast(t('Загружаю курсы…'));
+              M.updateRates().then((n) => n && toast(t('Обновлено курсов: {0}', n)))
+                .catch(() => toast(t('Не удалось загрузить курсы. Проверьте курсы в карточках счетов.')));
+            }
+          }
           M.commit();
         })) }),
         switchCell(t('Несколько валют'), s.multiCur, (v) => { s.multiCur = v; M.commit(); }, t('Счета в разных валютах с курсами')),
@@ -172,7 +188,7 @@ class DataScreen extends PinScreen {
         cell({ label: t('Экспорт CSV / QIF…'), labelClass: 'wide plain', onClick: () => exportMenu() }),
       ], { footer: t('Импорт понимает файлы QIF (в том числе из старого PocketMoney и Quicken) и CSV с колонками «Дата» и «Сумма».') }),
       group([
-        cell({ label: t('Размер данных'), value: `${Math.ceil(info.bytes / 1024)} КБ · ${pct}%`, valueClass: 'right' }),
+        cell({ label: t('Размер данных'), value: `${Math.ceil(info.bytes / 1024)} ${t('КБ')} · ${pct}%`, valueClass: 'right' }),
         cell({ label: t('Где хранится'), value: storage.hasCloud ? t('облако Telegram') : t('этот браузер'), valueClass: 'right' }),
       ], { footer: t('Облако Telegram вмещает примерно 2 МБ сжатых данных — это десятки тысяч операций.') }),
       group([

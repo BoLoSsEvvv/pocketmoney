@@ -102,5 +102,5 @@ async function main() {
 
 main().catch((e) => {
   console.error(e);
-  document.body.append(h('div', { class: 'empty', style: { color: '#fff' } }, 'Ошибка запуска: ' + e.message));
+  document.body.append(h('div', { class: 'empty', style: { color: '#fff' } }, t('Ошибка запуска: {0}', e.message)));
 });
