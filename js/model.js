@@ -256,6 +256,7 @@ function normalize(d) {
     x.splits = [];
     x.payee = '';
     x.amount = -Math.abs(x.amount);
+    x.toCleared = !!x.cleared; // перевод проводится сразу на обоих счетах
     const acc = account(x.acc), to = account(x.to);
     if (!state.settings.multiCur || curOf(acc) === curOf(to) || x.toAmount == null) x.toAmount = convert(-x.amount, x.acc, x.to);
     else x.toAmount = Math.abs(x.toAmount);
@@ -321,7 +322,7 @@ export function deleteTxn(id) {
 }
 
 export function toggleCleared(e) {
-  if (e.dir === 'in') e.t.toCleared = !e.t.toCleared;
+  if (e.t.type === 't') e.t.cleared = e.t.toCleared = !e.cleared; // обе стороны перевода
   else e.t.cleared = !e.t.cleared;
   e.t.mod = Date.now();
   commit();
@@ -746,7 +747,8 @@ export function netWorthAt(date) {
 // ---------- инструменты журнала ----------
 export function markAllCleared(entries) {
   for (const e of entries) {
-    if (e.dir === 'in') e.t.toCleared = true; else e.t.cleared = true;
+    e.t.cleared = true;
+    if (e.t.type === 't') e.t.toCleared = true;
     e.t.mod = Date.now();
   }
   commit();
