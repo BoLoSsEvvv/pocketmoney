@@ -3,7 +3,7 @@ import { h, sha256 } from './util.js';
 import { t } from './i18n.js';
 import * as M from './model.js';
 import * as storage from './storage.js';
-import { setRoot, initBack, refresh, TG, toast, haptic } from './ui.js';
+import { setRoot, initBack, refresh, TG, toast, haptic, alertBox } from './ui.js';
 import { HomeScreen } from './screens/home.js';
 import { pigEl } from './pig.js';
 
@@ -67,6 +67,17 @@ async function main() {
     if (TG?.isVersionAtLeast?.('7.7')) TG.disableVerticalSwipes();
   } catch {}
   document.body.append(h('div', { class: 'splash', id: 'loading' }, pigEl('pig'), h('p', null, 'PocketMoney')));
+  // обработчики нужны до загрузки: M.load() уже может сохранять
+  storage.setErrorHandler((e) => toast(e.message === 'too_big' ? t('Слишком много данных для облака Telegram. Сделайте свёртку старых операций.') : t('Не удалось сохранить в облако Telegram')));
+  storage.setConflictHandler(async () => {
+    const v = await alertBox({
+      title: t('Данные в облаке изменились'),
+      message: t('Похоже, их изменили на другом устройстве. Загрузить данные из облака (последние изменения на этом устройстве пропадут) или заменить их данными с этого устройства?'),
+      buttons: [{ label: t('Заменить'), value: 'mine', destructive: true }, { label: t('Загрузить'), value: 'cloud', primary: true }],
+    });
+    if (v === 'cloud') location.reload();
+    return v === 'mine';
+  });
   for (;;) {
     try {
       await M.load();
@@ -84,11 +95,14 @@ async function main() {
   document.getElementById('loading')?.remove();
   applyTheme();
   M.onChange(() => { applyTheme(); refresh(); });
-  storage.setErrorHandler((e) => toast(e.message === 'too_big' ? t('Слишком много данных для облака Telegram. Сделайте свёртку старых операций.') : t('Не удалось сохранить в облако Telegram')));
   if (storage.pushNeeded()) storage.save(M.state);
   initBack();
   setRoot(new HomeScreen());
   await lock();
+  if (storage.notice === 'offline') toast(t('Нет связи с облаком Telegram — показаны данные с этого устройства'));
+  else if (storage.notice) alertBox({ message: storage.notice === 'aside'
+    ? t('Изменения на этом устройстве не попали в облако и расходятся с ним. Открыты данные из облака.')
+    : t('Облачная копия данных повреждена — открыта последняя целая версия.') });
   if (M.state.settings.multiCur && M.state.settings.autoRates) M.updateRates().catch(() => {});
 
   let hiddenAt = 0;
@@ -97,6 +111,7 @@ async function main() {
     const s = M.state.settings;
     if (s.passHash && hiddenAt && Date.now() - hiddenAt >= (s.passDelay || 0) * 60000) lock();
     if (M.postDueRepeats()) M.commit(); else refresh();
+    storage.retry(); // дослать в облако то, что не ушло
   });
 }
 
