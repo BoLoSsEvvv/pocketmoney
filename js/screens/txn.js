@@ -221,9 +221,12 @@ export class EditTxnScreen extends Screen {
         : null;
       amtCell = amountCell(t('Сумма'), d.amount, (v) => {
         this.touched.amount = true;
+        this.amtFromTo = false;
         if (v < 0 && d.type !== 't') { d.type = d.type === 'w' ? 'd' : 'w'; v = -v; d.amount = v; this.render(); return; }
         d.amount = Math.abs(v);
         if (d.fAmt && d.fRate) d.fAmt = Math.round(d.amount / d.fRate);
+        // «Зачислено» не вводили вручную — пересчитываем по курсу
+        if (this.toAmtInput && d.toAmount == null) this.toAmtInput.value = amountInput(M.convert(d.amount, d.acc, d.to));
       }, { right: rateBtn, onInput: () => (this.touched.amount = true) });
       this.amountInputEl = amtCell.input;
     }
@@ -233,11 +236,22 @@ export class EditTxnScreen extends Screen {
     else if (s.categoryFirst) first.push(catCell, ...partyCells);
     else first.push(...partyCells, catCell);
     first.push(amtCell);
+    this.toAmtInput = null;
     if (d.type === 't') {
       const to = M.account(d.to);
       if (multi && to && M.curOf(to) !== M.curOf(acc)) {
         const toAmt = d.toAmount ?? M.convert(d.amount, d.acc, d.to);
-        first.push(amountCell(t('Зачислено'), toAmt, (v) => { d.toAmount = Math.abs(v); }, { right: h('span', { class: 'muted' }, M.curOf(to)) }));
+        const toCell = amountCell(t('Зачислено'), toAmt, (v) => {
+          d.toAmount = Math.abs(v);
+          // Сумма не введена (или сама посчитана отсюда) — считаем её обратно по курсу
+          if (!d.amount || this.amtFromTo) {
+            d.amount = M.convert(d.toAmount, d.to, d.acc);
+            this.amtFromTo = true;
+            if (this.amountInputEl) this.amountInputEl.value = amountInput(d.amount);
+          }
+        }, { right: h('span', { class: 'muted' }, M.curOf(to)) });
+        this.toAmtInput = toCell.input;
+        first.push(toCell);
       }
       first.push(cell({ label: t('Категория'), value: d.category, placeholder: t('необязательно'), onClick: () => pickCategory(d.category, '', (v) => { d.category = v; }) }));
     }
