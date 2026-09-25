@@ -2,27 +2,41 @@
 import { h, today, addDays, addMonths, fmt, uid, pad, evalAmount, parse, iso } from './util.js';
 import { t } from './i18n.js';
 import * as M from './model.js';
-import { actionSheet, alertBox, confirmBox, toast, push, PickerScreen } from './ui.js';
+import { actionSheet, alertBox, confirmBox, toast, push, PickerScreen, TG } from './ui.js';
 
 // ---------- выдача файла ----------
+// true — файл действительно отдан (поделились, скачали, скопировали)
 export async function deliverFile(name, text, mime = 'text/plain') {
   const blob = new Blob([text], { type: mime + ';charset=utf-8' });
   const file = new File([blob], name, { type: mime });
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(text); toast(t('Скопировано — вставьте в «Избранное» Telegram')); return true; }
+    catch {
+      // весь текст целиком: обрезанная копия не восстановится
+      const ta = h('textarea', {
+        readonly: true, value: text, onfocus: (e) => e.target.select(),
+        style: { display: 'block', width: '100%', height: '40vh', marginTop: '8px', font: '12px monospace', textAlign: 'left', color: '#000', background: '#fff', borderRadius: '4px', textShadow: 'none' },
+      });
+      return (await alertBox({ title: name, message: [t('Не удалось скопировать автоматически. Выделите текст вручную:'), ta], buttons: [{ label: t('Отменить'), value: false }, { label: 'OK', value: true, primary: true }] })) === true;
+    }
+  };
   const opts = [];
   if (navigator.canShare?.({ files: [file] })) opts.push([t('Поделиться файлом…'), async () => {
-    try { await navigator.share({ files: [file], title: name }); } catch (e) { if (e.name !== 'AbortError') toast(t('Не удалось поделиться')); }
+    try { await navigator.share({ files: [file], title: name }); return true; }
+    catch (e) { if (e.name === 'AbortError') return false; toast(t('Не удалось поделиться')); return copy(); }
   }]);
-  opts.push([t('Скачать файл'), () => {
-    const a = h('a', { href: URL.createObjectURL(blob), download: name });
-    document.body.append(a); a.click(); a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  // в мобильном Telegram ссылка download на blob молча ничего не делает — не предлагаем
+  if (!(TG?.initData && /^(ios|android)/.test(TG.platform))) opts.push([t('Скачать файл'), () => {
+    try {
+      const a = h('a', { href: URL.createObjectURL(blob), download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      return true;
+    } catch { toast(t('Не удалось скачать файл')); return false; }
   }]);
-  opts.push([t('Скопировать как текст'), async () => {
-    try { await navigator.clipboard.writeText(text); toast(t('Скопировано — вставьте в «Избранное» Telegram')); }
-    catch { await alertBox({ title: name, message: t('Не удалось скопировать автоматически. Выделите текст вручную:'), input: { value: text.slice(0, 20000) }, buttons: [{ label: 'OK', value: true }] }); }
-  }]);
+  opts.push([t('Скопировать как текст'), copy]);
   const i = await actionSheet({ title: `${name} (${Math.ceil(text.length / 1024)} КБ)`, buttons: opts.map(([label]) => ({ label })) });
-  if (i != null) await opts[i][1]();
+  return i != null && !!(await opts[i][1]());
 }
 
 const stamp = () => today().replace(/-/g, '');
@@ -62,6 +76,7 @@ export function toQIF(accId, entries) {
     if (e.cleared) out.push('C*');
     if (x.num) out.push(`N${x.num}`);
     if (x.type === 't') out.push(`P${M.accName(e.other)}`, `L[${M.accName(e.other)}]`);
+    else if (x.opening) out.push(`P${x.payee || 'Opening Balance'}`, `L[${acc.name}]`); // начальный баланс, как в Quicken
     else {
       if (x.payee) out.push(`P${x.payee}`);
       if (x.splits?.length && e.dir === 'out') {
@@ -97,8 +112,8 @@ export async function exportMenu() {
   ];
   const i = await actionSheet({ title: t('Экспорт и резервные копии'), buttons: items.map(([label]) => ({ label })) });
   if (i == null) return;
-  await items[i][1]();
-  if (i >= 1 && i <= 3) { M.state.lastExport = Date.now(); M.commit(); }
+  const ok = await items[i][1]();
+  if (ok && i >= 1 && i <= 3) { M.state.lastExport = Date.now(); M.commit(); } // только если файл отдан
 }
 
 export async function exportEntries(entries, accId) {
@@ -122,13 +137,23 @@ function pickFile(accept) {
       inp.remove();
       if (!f) return resolve(null);
       const r = new FileReader();
-      r.onload = () => resolve({ name: f.name, text: String(r.result) });
+      r.onload = () => resolve({ name: f.name, text: decodeText(r.result) });
       r.onerror = () => resolve(null);
-      r.readAsText(f);
+      r.readAsArrayBuffer(f);
     });
     document.body.append(inp);
     inp.click();
   });
+}
+
+// Кодировка: BOM (UTF-8/UTF-16), иначе строгий UTF-8, иначе Windows-1251
+export function decodeText(buf) {
+  const b = new Uint8Array(buf);
+  const dec = (enc, o) => new TextDecoder(enc, o).decode(b);
+  if (b[0] === 0xff && b[1] === 0xfe) return dec('utf-16le');
+  if (b[0] === 0xfe && b[1] === 0xff) return dec('utf-16be');
+  if (b.length > 3 && b[0] && !b[1] && b[2] && !b[3]) return dec('utf-16le'); // UTF-16 без BOM
+  try { return dec('utf-8', { fatal: true }); } catch { return dec('windows-1251'); }
 }
 
 export async function importFile() {
@@ -169,14 +194,17 @@ function chooseAccount(title) {
   });
 }
 
-function parseDate(s) {
-  s = s.trim().replace(/\s/g, '');
-  let m;
-  if ((m = /^(\d{4})-(\d{1,2})-(\d{1,2})/.exec(s))) return `${m[1]}-${pad(+m[2])}-${pad(+m[3])}`;
-  if ((m = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/.exec(s))) return `${yr(m[3], false)}-${pad(+m[2])}-${pad(+m[1])}`;
-  if ((m = /^(\d{1,2})\/(\d{1,2})(['/-])(\d{2,4})$/.exec(s))) return `${yr(m[4], m[3] === "'")}-${pad(+m[1])}-${pad(+m[2])}`;
-  if ((m = /^(\d{1,2})-(\d{1,2})-(\d{2,4})$/.exec(s))) return `${yr(m[3], false)}-${pad(+m[1])}-${pad(+m[2])}`;
-  return null;
+// dmy — в файле даты дд/мм (иначе мм/дд, как в Quicken; первое число > 12 — всё равно дд/мм)
+export function parseDate(s, dmy) {
+  s = (s || '').trim().replace(/[T\s,]+\d{1,2}:\d{2}.*$/, '').replace(/\s/g, ''); // время после даты не нужно
+  let m, y, mo, d;
+  if ((m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(s))) [y, mo, d] = [+m[1], +m[2], +m[3]];
+  else if ((m = /^(\d{1,2})\.(\d{1,2})\.(\d{2,4})$/.exec(s))) [y, mo, d] = [yr(m[3], false), +m[2], +m[1]];
+  else if ((m = /^(\d{1,2})\/(\d{1,2})(['/-])(\d{2,4})$/.exec(s) || /^(\d{1,2})-(\d{1,2})(-)(\d{2,4})$/.exec(s))) {
+    [y, mo, d] = [yr(m[4], m[3] === "'"), +m[1], +m[2]];
+    if (dmy || mo > 12) [mo, d] = [d, mo];
+  } else return null;
+  return mo >= 1 && mo <= 12 && d >= 1 && d <= new Date(y, mo, 0).getDate() ? `${y}-${pad(mo)}-${pad(d)}` : null;
 }
 function yr(y, apos) {
   y = +y;
@@ -184,12 +212,17 @@ function yr(y, apos) {
   if (apos) return 2000 + y;
   return y < 70 ? 2000 + y : 1900 + y;
 }
-function parseNum(s) {
-  s = (s || '').trim().replace(/[\s ]/g, '');
-  if (s.includes(',') && s.includes('.')) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
-  else if (s.includes(',')) s = s.replace(',', '.');
-  const v = parseFloat(s.replace(/[^\d.\-]/g, ''));
-  return Number.isFinite(v) ? Math.round(v * 100) : null;
+export function parseNum(s) {
+  s = String(s ?? '').replace(/[a-zа-яё]+\.?|[₽$€£¥'’\s]/gi, ''); // «руб.», «RUB», ₽, пробелы (в т.ч. неразрывные)
+  const neg = /^\(.*\)$|[-−–]/.test(s); // (1 234,56), минус U+2212, тире
+  s = s.replace(/[^\d.,]/g, '');
+  const nc = s.split(',').length - 1, np = s.split('.').length - 1;
+  if (nc && np) s = s.lastIndexOf(',') > s.lastIndexOf('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  else if (nc > 1) s = s.replace(/,/g, '');
+  else if (np > 1) s = s.replace(/\./g, '');
+  else s = s.replace(',', '.');
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? Math.round((neg ? -v : v) * 100) : null;
 }
 
 export function parseQIF(text) {
@@ -199,6 +232,7 @@ export function parseQIF(text) {
   let inAccount = false;
   let acctName = null;
   let split = null;
+  const dmy = /^D\s*(1[3-9]|2\d|3[01])\s*[/-]/m.test(text); // где-то день > 12 — значит весь файл дд/мм
   const lines = text.split(/\r?\n/);
   for (const raw of lines) {
     const line = raw.trimEnd();
@@ -223,7 +257,7 @@ export function parseQIF(text) {
     x ??= { splits: [] };
     const c = line[0], v = line.slice(1);
     switch (c) {
-      case 'D': x.date = parseDate(v); break;
+      case 'D': x.date = parseDate(v, dmy); break;
       case 'T': case 'U': x.amount = parseNum(v); break;
       case 'P': x.payee = v.trim(); break;
       case 'N': x.num = v.trim(); break;
@@ -233,7 +267,11 @@ export function parseQIF(text) {
       case 'S': split = { cat: v.trim() }; x.splits.push(split); break;
       case 'E': if (split) split.memo = v.trim(); break;
       case '$': if (split) split.amount = parseNum(v); break;
-      case '^': if (x.date && x.amount != null) cur.txns.push(x); x = null; split = null; break;
+      case '^':
+        if (x.date && x.amount != null) cur.txns.push(x);
+        // файл Quicken без !Account: имя счёта — из «Opening Balance» L[Счёт]
+        if (!cur.name && OPENING.test(x.payee || '')) cur.name = /^\[(.+?)\]/.exec(x.cat || '')?.[1] || null;
+        x = null; split = null; break;
       default: break;
     }
   }
@@ -256,56 +294,92 @@ async function targetAccount(name, qifType) {
   return M.saveAccount({ name: name || t('Импорт'), type, icon: type === 'cash' ? '💵' : type === 'credit' ? '💳' : '🏦', worth: true, currency: M.state.settings.home, rate: 1 }).id;
 }
 
-function isDup(accId, d) {
-  return M.state.txns.some((x) => x.acc === accId && x.date === d.date && Math.abs(x.amount) === Math.abs(d.amount) && (x.payee || '') === (d.payee || ''));
+// Дубликаты ищем только среди операций, что были до импорта (одинаковые строки в самом файле —
+// настоящие повторы), один к одному: старая операция «гасит» не больше одной новой.
+function dupChecker() {
+  const pool = new Map();
+  for (const x of M.state.txns) {
+    const k = x.acc + '|' + x.date;
+    if (!pool.has(k)) pool.set(k, []);
+    pool.get(k).push(x);
+  }
+  return (d) => {
+    const l = pool.get(d.acc + '|' + d.date) || [];
+    const i = l.findIndex((x) => (d.type === 't'
+      ? x.type === 't' && x.to === d.to && Math.abs(x.amount) === Math.abs(d.amount)
+      : x.amount === (d.type === 'w' ? -1 : 1) * Math.abs(d.amount) && (x.payee || '') === (d.payee || '')));
+    return i >= 0 && !!l.splice(i, 1);
+  };
+}
+
+const OPENING = /^(начальный баланс|opening balance)$/i;
+
+// Переводы: каждый встречается в обоих счетах — сводим стороны по дате и паре счетов
+// (суммы сторон бывают в разных валютах); приход сохраняем как toAmount.
+function addTransfers(pend, dup, alias = {}) {
+  let added = 0, dups = 0;
+  const idOf = (n) => alias[n.toLowerCase()] || M.state.accounts.find((a) => a.name.toLowerCase() === n.toLowerCase())?.id;
+  for (const p of pend) p.otherId = idOf(p.other);
+  const used = new Set();
+  for (const p of pend) {
+    if (used.has(p)) continue;
+    used.add(p);
+    let d;
+    if (!p.otherId || p.otherId === p.accId) {
+      d = { acc: p.accId, date: p.date, amount: Math.abs(p.amount), type: p.amount < 0 ? 'w' : 'd', payee: p.other, category: p.category, cls: p.cls, num: p.num, memo: p.memo, cleared: p.cleared, splits: [] };
+    } else {
+      const out = p.amount < 0;
+      const cand = pend.filter((o) => !used.has(o) && o.accId === p.otherId && o.otherId === p.accId && o.date === p.date && (o.amount < 0) !== out);
+      const m = cand.find((o) => o.amount === -p.amount) || cand[0];
+      if (m) used.add(m);
+      const [o, i] = out ? [p, m] : [m, p]; // уход и приход
+      const from = out ? p.accId : p.otherId, to = out ? p.otherId : p.accId, s = o || i;
+      d = {
+        acc: from, to, type: 't', date: p.date, amount: Math.abs(o ? o.amount : M.convert(i.amount, to, from)), toAmount: i ? Math.abs(i.amount) : null,
+        payee: '', category: s.category, cls: s.cls, num: s.num, memo: s.memo, cleared: s.cleared, splits: [],
+      };
+    }
+    if (dup(d)) { dups++; continue; }
+    M.saveTxn(d, { silent: true });
+    added++;
+  }
+  return { added, dups };
 }
 
 async function importQIF(text) {
   const blocks = parseQIF(text);
   if (!blocks.length) throw new Error(t('В файле нет операций'));
+  const dup = dupChecker();
   let added = 0, dups = 0;
-  const pendingTransfers = [];
+  const pend = [], alias = {}; // имя счёта в файле → выбранный счёт
   for (const b of blocks) {
     const accId = await targetAccount(b.name, b.type);
     if (!accId) continue;
+    if (b.name) alias[b.name.toLowerCase()] = accId;
+    const own = [b.name, M.accName(accId)].filter(Boolean).map((n) => n.toLowerCase());
     for (const q of b.txns) {
-      const tm = /^\[(.+)\]$/.exec(q.cat || '');
-      if (tm) {
-        pendingTransfers.push({ accId, q, other: tm[1] });
+      const tm = /^\[(.+?)\](?:\/(.*))?$/.exec(q.cat || '');
+      const self = tm && own.includes(tm[1].trim().toLowerCase()); // L[этот же счёт] — начальный баланс (Quicken)
+      if (tm && !self) {
+        pend.push({ accId, other: tm[1].trim(), date: q.date, amount: q.amount, num: q.num || '', memo: q.memo || '', cleared: !!q.cleared, category: '', cls: tm[2] || '' });
         continue;
       }
       const d = {
         acc: accId, date: q.date, amount: Math.abs(q.amount), type: q.amount < 0 ? 'w' : 'd', payee: q.payee || '',
-        num: q.num || '', memo: q.memo || '', cleared: !!q.cleared, to: null, splits: [], ...splitCat(q.cat),
+        num: q.num || '', memo: q.memo || '', cleared: !!q.cleared, to: null, splits: [], ...(self ? { category: '', cls: tm[2] || '' } : splitCat(q.cat)),
       };
+      if (self || (!q.cat && OPENING.test(d.payee))) d.opening = true;
       if (q.splits.length > 1) {
         d.splits = q.splits.map((s) => ({ ...splitCat(s.cat), amount: s.amount || 0, memo: s.memo || '' }));
         d.category = '';
       }
-      if (isDup(accId, { ...d, amount: q.amount })) { dups++; continue; }
+      if (dup(d)) { dups++; continue; }
       M.saveTxn(d, { silent: true });
       added++;
     }
   }
-  // переводы: каждая пара встречается в обоих счетах — берём только уход денег
-  for (const p of pendingTransfers) {
-    const other = M.state.accounts.find((a) => a.name.toLowerCase() === p.other.toLowerCase());
-    if (!other) {
-      M.saveTxn({ acc: p.accId, date: p.q.date, amount: Math.abs(p.q.amount), type: p.q.amount < 0 ? 'w' : 'd', payee: p.other, category: '', cls: '', num: p.q.num || '', memo: p.q.memo || '', cleared: !!p.q.cleared, splits: [] }, { silent: true });
-      added++;
-      continue;
-    }
-    if (p.q.amount > 0) {
-      const mirrored = pendingTransfers.some((o) => o.accId === other.id && o.q.date === p.q.date && o.q.amount === -p.q.amount);
-      if (mirrored) continue;
-    }
-    const from = p.q.amount < 0 ? p.accId : other.id;
-    const to = p.q.amount < 0 ? other.id : p.accId;
-    const exists = M.state.txns.some((x) => x.type === 't' && x.acc === from && x.to === to && x.date === p.q.date && Math.abs(x.amount) === Math.abs(p.q.amount));
-    if (exists) { dups++; continue; }
-    M.saveTxn({ acc: from, to, type: 't', date: p.q.date, amount: Math.abs(p.q.amount), payee: '', category: '', cls: '', num: p.q.num || '', memo: p.q.memo || '', cleared: !!p.q.cleared, splits: [] }, { silent: true });
-    added++;
-  }
+  const tr = addTransfers(pend, dup, alias);
+  added += tr.added; dups += tr.dups;
   M.commit();
   alertBox({ title: t('Импорт завершён'), message: t('Добавлено операций: {0}', added) + (dups ? '\n' + t('Пропущено дубликатов: {0}', dups) : '') });
 }
@@ -330,41 +404,60 @@ function splitCSVLine(line, d) {
 async function importCSV(text) {
   const lines = text.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) throw new Error(t('В файле нет строк'));
-  const d = (lines[0].match(/;/g) || []).length >= (lines[0].match(/,/g) || []).length ? ';' : lines[0].includes('\t') ? '\t' : ',';
+  // разделитель — самый частый в заголовке (вне кавычек); при равенстве таб, затем «;»
+  const h0 = lines[0].replace(/"[^"]*"/g, ''), cnt = (ch) => h0.split(ch).length - 1;
+  const d = ['\t', ';', ','].reduce((a, ch) => (cnt(ch) > cnt(a) ? ch : a));
   const head = splitCSVLine(lines[0], d).map((s) => s.trim().toLowerCase());
   const col = (...names) => head.findIndex((hh) => names.some((n) => hh.includes(n)));
   const ci = {
-    date: col('дата', 'date'), acc: col('счёт', 'счет', 'account'), num: col('номер', 'num', 'check'),
+    date: col('дата', 'date'), acc: col('счёт', 'счет', 'account'), num: col('номер', 'num', 'check', 'id#'),
     payee: col('получатель', 'payee', 'описание', 'description', 'контрагент'), cat: col('категория', 'category'),
     cls: col('класс', 'class'), memo: col('примечание', 'memo', 'комментарий', 'note'), amt: col('сумма', 'amount'),
-    cleared: col('проведена', 'cleared'),
+    cleared: col('проведена', 'cleared'), cur: col('валюта', 'currency'),
   };
   if (ci.date < 0 || ci.amt < 0) throw new Error(t('Нужны хотя бы колонки «Дата» и «Сумма»'));
   let fixedAcc = null;
   if (ci.acc < 0) { fixedAcc = await targetAccount(null); if (!fixedAcc) return; }
   const accCache = {};
+  const dup = dupChecker(), pend = [];
   let added = 0, dups = 0, bad = 0;
+  const dmy = lines.slice(1).some((l) => /^(1[3-9]|2\d|3[01])[/-]/.test((splitCSVLine(l, d)[ci.date] || '').trim())); // день > 12 — файл дд/мм
   for (const line of lines.slice(1)) {
     const c = splitCSVLine(line, d);
-    const date = parseDate(c[ci.date] || '');
+    const date = parseDate(c[ci.date] || '', dmy);
     const amount = parseNum(c[ci.amt]);
     if (!date || amount == null) { bad++; continue; }
     let accId = fixedAcc;
     if (!accId) {
       const name = (c[ci.acc] || '').trim() || t('Импорт');
-      accId = accCache[name] ??= M.state.accounts.find((a) => a.name === name)?.id || M.saveAccount({ name, type: 'checking', icon: '🏦', worth: true, currency: M.state.settings.home, rate: 1 }).id;
+      accId = accCache[name] ??= M.state.accounts.find((a) => a.name === name)?.id || csvAccount(name, (c[ci.cur] || '').trim().toUpperCase());
     }
     const x = {
       acc: accId, date, amount: Math.abs(amount), type: amount < 0 ? 'w' : 'd', payee: (c[ci.payee] || '').trim(),
       category: (c[ci.cat] || '').trim(), cls: (c[ci.cls] || '').trim(), num: (c[ci.num] || '').trim(), memo: (c[ci.memo] || '').trim(),
       cleared: ci.cleared >= 0 && /^(1|да|yes|true|\*|x)$/i.test((c[ci.cleared] || '').trim()), splits: [],
     };
-    if (isDup(accId, x)) { dups++; continue; }
+    const tm = /^<(.+)>$/.exec(x.payee); // перевод, как его пишет наш экспорт
+    if (tm) { pend.push({ ...x, accId, other: tm[1], amount }); continue; }
+    if (!x.category && OPENING.test(x.payee)) x.opening = true;
+    if (dup(x)) { dups++; continue; }
     M.saveTxn(x, { silent: true });
     added++;
   }
+  const tr = addTransfers(pend, dup);
+  added += tr.added; dups += tr.dups;
   M.commit();
   alertBox({ title: t('Импорт завершён'), message: t('Добавлено операций: {0}', added) + (dups ? '\n' + t('Пропущено дубликатов: {0}', dups) : '') + (bad ? '\n' + t('Не распознано строк: {0}', bad) : '') });
+}
+
+// Новый счёт из CSV: валюта из колонки «Валюта»; чужая валюта включает мультивалютность
+function csvAccount(name, cur) {
+  const s = M.state.settings;
+  if (cur === 'RUR') cur = 'RUB';
+  if (!/^[A-Z]{3}$/.test(cur)) cur = s.home;
+  if (cur !== s.home) s.multiCur = true;
+  const rate = cur === s.home ? 1 : M.state.accounts.find((a) => a.currency === cur)?.rate || 1;
+  return M.saveAccount({ name, type: 'checking', icon: '🏦', worth: true, currency: cur, rate }).id;
 }
 
 // ---------- демо-данные ----------

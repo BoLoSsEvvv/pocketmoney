@@ -7,6 +7,7 @@ export const EN = {
   'Поделиться файлом…': 'Share file…',
   'Не удалось поделиться': 'Could not share',
   'Скачать файл': 'Download file',
+  'Не удалось скачать файл': 'Could not download the file',
   'Скопировать как текст': 'Copy as text',
   'Скопировано — вставьте в «Избранное» Telegram': 'Copied — paste it into Telegram “Saved Messages”',
   'Не удалось скопировать автоматически. Выделите текст вручную:': 'Could not copy automatically. Select the text manually:',
