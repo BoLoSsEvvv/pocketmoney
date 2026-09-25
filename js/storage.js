@@ -151,7 +151,10 @@ export async function load() {
   base = c.raw;
   // локальная копия от этой же облачной версии? (у копий без pm_sync сверяем savedAt)
   const own = local && (sync ? sync.m === c.raw : local.data.savedAt === c.data.savedAt);
-  if (own && (sync?.d || c.damaged)) {
+  // копия прежней версии (без pm_sync) новее облака и не беднее его — её отправка просто не дошла
+  const legacy = local && !sync && (local.data.savedAt || 0) > (c.data.savedAt || 0)
+    && (local.data.txns?.length || 0) >= (c.data.txns?.length || 0);
+  if ((own && (sync?.d || c.damaged)) || legacy) {
     // в ней есть неотправленные изменения (или облачная копия испорчена) — дошлём
     needPush = true;
     return local.data;
