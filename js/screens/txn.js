@@ -3,7 +3,7 @@ import { h, clone, money, longDate, today, evalAmount, amountInput, fmtRate, wee
 import { t } from '../i18n.js';
 import * as M from '../model.js';
 import {
-  Screen, push, pop, toolbar, segmented, subbar, balanceBar, group, cell, inputCell, switchCell, checkCell, PickerScreen,
+  Screen, push, pop, top, toolbar, segmented, subbar, balanceBar, group, cell, inputCell, switchCell, checkCell, PickerScreen,
   datePicker, actionSheet, confirmBox, alertBox, toast, backButton, deleteCircle, chevron, haptic, promptBox,
 } from '../ui.js';
 
@@ -48,18 +48,23 @@ export function pickFromList(list, title, value, onPick) {
   }));
 }
 
-// Поле суммы с калькулятором: "120+35"
+// Поле суммы с калькулятором: "120+35". Сумма уходит в модель на каждый ввод:
+// на iPhone тап по кнопке не снимает фокус, и onchange может не случиться. onValue(cents, прежнее)
 function amountCell(label, cents, onValue, extra = {}) {
+  let last = cents ?? 0; // последнее верное значение: недописанное «120+» его не трогает
   const c = inputCell({
     label, value: amountInput(cents), placeholder: '0', inputmode: 'decimal',
-    onInput: extra.onInput,
+    onInput: (v) => { const r = v.trim() ? evalAmount(v) : 0; if (r != null) { const p = last; last = r; onValue(r, p); } },
     onChange: (v) => {
-      const r = evalAmount(v);
-      if (r == null && v.trim()) { toast(t('Неверная сумма')); return; }
-      onValue(r ?? 0);
+      const r = v.trim() ? evalAmount(v) : 0;
+      if (r == null) toast(t('Неверная сумма'));
+      c.input.setCents(Math.abs(r ?? last)); // показать итог: «120+35» → «155,00»
     },
     right: extra.right,
   });
+  c.input.setCents = (x) => { last = x; c.input.value = amountInput(x); };
+  c.input.cents = () => last;
+  if (extra.key) c.input.dataset.f = extra.key;
   c.input.addEventListener('focus', () => setTimeout(() => c.input.select(), 30));
   return c;
 }
@@ -88,6 +93,7 @@ export class EditTxnScreen extends Screen {
     this.isNew = !d.id && !opts.repeatId;
     this.touched = {};
     this.ruleChanged = false;
+    this.fees = []; // «+Комиссия»: запишется вместе с операцией
     this.origJson = JSON.stringify(this.d);
   }
 
@@ -107,7 +113,7 @@ export class EditTxnScreen extends Screen {
 
   async cancel() {
     this.flushInputs();
-    if (JSON.stringify(this.d) !== this.origJson || this.ruleChanged) {
+    if (JSON.stringify(this.d) !== this.origJson || this.ruleChanged || this.fees.length) {
       const i = await actionSheet({ title: t('Сохранить изменения?'), buttons: [{ label: t('Сохранить') }, { label: t('Не сохранять'), destructive: true }] });
       if (i === 0) return this.save();
       if (i !== 1) return;
@@ -127,29 +133,54 @@ export class EditTxnScreen extends Screen {
     if (src === 'amount') {
       d.amount = cents;
       d.toAmount = null; // посчитается по курсу при сохранении
-      this.toAmtInput.value = amountInput(M.convert(cents, d.acc, d.to));
+      this.toAmtInput.setCents(M.convert(cents, d.acc, d.to));
     } else {
       d.toAmount = cents;
       d.amount = M.convert(cents, d.to, d.acc);
-      this.amountInputEl.value = amountInput(d.amount);
+      this.amountInputEl.setCents(d.amount);
+    }
+  }
+
+  // Перерисовать, не трогая поле в фокусе: на iPhone его замена прячет клавиатуру и съедает набранное
+  rerender() {
+    const a = document.activeElement, k = a?.dataset?.f;
+    if (!k || !this.el.contains(a)) return this.render();
+    const live = this.el, sc = this.scroller.scrollTop;
+    this.el = h('div');
+    this.render();
+    const fresh = this.el, b = fresh.querySelector(`[data-f="${k}"]`);
+    this.el = live;
+    if (!b) { live.replaceChildren(...fresh.childNodes); this.scroller.scrollTop = sc; return; } // поля больше нет
+    // новое вставляем вокруг живой ячейки, поднимаясь до экрана
+    for (let l = a.closest('.cell'), f = b.closest('.cell'); l !== live; l = l.parentNode, f = f.parentNode) {
+      for (const n of [...l.parentNode.childNodes]) if (n !== l) n.remove();
+      const kids = [...f.parentNode.childNodes], i = kids.indexOf(f);
+      l.before(...kids.slice(0, i));
+      l.after(...kids.slice(i + 1));
+    }
+    this.scroller = a.closest('.content');
+    for (const p in this) if (this[p] === b) this[p] = a;
+    // значение поменялось в обход поля (автозаполнение) — показать; набранное не трогаем
+    if (a.cents ? Math.abs(a.cents()) !== Math.abs(evalAmount(b.value) ?? 0) : a.value !== b.value) {
+      if (a.setCents) a.setCents(evalAmount(b.value) ?? 0); else a.value = b.value;
+      a.select();
     }
   }
 
   setType(v) {
+    this.flushInputs();
     const d = this.d;
     if (v === 't') {
       if (M.state.accounts.length < 2) return toast(t('Для перевода нужен второй счёт'));
       d.type = 't';
       if (d.splits.length) { d.amount = Math.abs(d.splits.reduce((a, s) => a + s.amount, 0)); d.splits = []; }
       if (!d.to || d.to === d.acc) {
-        pickAccount(t('Перевод на'), null, (id) => { d.to = id; }, d.acc);
+        pickAccount(t('Перевод на'), null, (id) => { d.to = id; d.toAmount = null; }, d.acc);
       }
     } else {
-      if (d.splits.length) {
-        // меняем знак всех частей
-        const sign = v === 'w' ? -1 : 1;
-        d.splits.forEach((s) => (s.amount = sign * Math.abs(s.amount)));
-      }
+      const tot = this.splitTotal();
+      // знак итога сплита меняется — меняем знак каждой части (−1000 и +300 → +1000 и −300)
+      if (tot && (tot < 0) !== (v === 'w')) d.splits.forEach((s) => (s.amount = -s.amount));
       d.type = v;
     }
     this.render();
@@ -157,12 +188,14 @@ export class EditTxnScreen extends Screen {
 
   splitTotal() { return this.d.splits.reduce((a, s) => a + s.amount, 0); }
 
+  // true — что-то подставили
   applyAuto(payee) {
     const s = M.state.settings;
-    if (!this.isNew || !s.autocomplete) return;
+    if (!this.isNew || !s.autocomplete) return false;
     const last = M.lastByPayee(payee);
-    if (!last) return;
+    if (!last) return false;
     const d = this.d;
+    const was = JSON.stringify(d);
     if (!d.category && !d.splits.length && last.category) d.category = last.category;
     if (!s.clearSplitsOnAuto && last.splits?.length && !d.splits.length && !this.touched.amount) d.splits = clone(last.splits);
     if (!this.touched.amount && !s.clearAmountOnAuto && !d.splits.length) {
@@ -172,7 +205,9 @@ export class EditTxnScreen extends Screen {
     if (d.splits.length) d.type = this.splitTotal() < 0 ? 'w' : 'd';
     if (!d.cls && last.cls) d.cls = last.cls;
     if (!d.num && last.num && !/^\d+$/.test(last.num)) d.num = last.num;
+    if (JSON.stringify(d) === was) return false;
     haptic();
+    return true;
   }
 
   payeeCell() {
@@ -191,17 +226,19 @@ export class EditTxnScreen extends Screen {
     const c = inputCell({
       label, value: d.payee, placeholder: t('Получатель'),
       onInput: (v) => { d.payee = v; showSugg(v); },
-      onChange: (v) => { d.payee = v.trim(); if (this.isNew) { this.applyAuto(d.payee); setTimeout(() => this.render(), 150); } },
+      // перерисовать только если автозаполнение что-то подставило, и не трогая поле, куда уже перешёл фокус
+      onChange: (v) => { d.payee = v.trim(); if (this.applyAuto(d.payee)) setTimeout(() => top() === this && this.rerender(), 150); },
       onBlur: () => setTimeout(() => sugg.replaceChildren(), 200),
       right: h('span', { class: 'chev', onclick: (e) => { e.preventDefault(); pickPayee(d.payee, d.category, (v) => { d.payee = v; this.applyAuto(v); }); } }),
     });
     this.payeeInput = c.input;
+    c.input.dataset.f = 'payee';
     return [c, sugg];
   }
 
   categoryCell() {
     const d = this.d;
-    if (d.splits.length) return cell({ label: t('Категория'), value: t('<--сплит-->'), onClick: () => push(new SplitsScreen(this)) });
+    if (d.splits.length) return cell({ label: t('Категория'), value: t('<--сплит-->'), onClick: () => this.openSplits() });
     return cell({ label: t('Категория'), value: d.category, placeholder: t('Категория'), onClick: () => pickCategory(d.category, d.payee, (v) => { d.category = v; }) });
   }
 
@@ -215,13 +252,13 @@ export class EditTxnScreen extends Screen {
     const dateCell = cell({
       label: t('Дата'), value: longDate(d.date), valueClass: repeating ? 'rep' : '',
       onClick: async () => { const v = await datePicker(d.date); if (v) { d.date = v; this.touched.date = true; this.render(); } },
-      detail: () => push(new RepeatScreen(this)), chevron: false,
+      detail: () => { this.flushInputs(); push(new RepeatScreen(this)); }, chevron: false,
     });
-    const accCell = cell({ label: t('Счёт'), value: acc?.name, onClick: () => pickAccount(t('Счёт'), d.acc, (id) => { d.acc = id; if (d.to === id) d.to = null; }) });
+    const accCell = cell({ label: t('Счёт'), value: acc?.name, onClick: () => pickAccount(t('Счёт'), d.acc, (id) => { if (id !== d.acc) d.toAmount = null; d.acc = id; if (d.to === id) d.to = null; }) });
 
     let partyCells;
     if (d.type === 't') {
-      partyCells = [cell({ label: t('Перевод на'), value: d.to ? M.accName(d.to) : '', placeholder: t('Выберите счёт'), onClick: () => pickAccount(t('Перевод на'), d.to, (id) => { d.to = id; }, d.acc) })];
+      partyCells = [cell({ label: t('Перевод на'), value: d.to ? M.accName(d.to) : '', placeholder: t('Выберите счёт'), onClick: () => pickAccount(t('Перевод на'), d.to, (id) => { if (id !== d.to) d.toAmount = null; d.to = id; }, d.acc) })];
     } else {
       partyCells = this.payeeCell();
     }
@@ -229,19 +266,20 @@ export class EditTxnScreen extends Screen {
 
     let amtCell;
     if (d.splits.length) {
-      amtCell = cell({ label: t('Сумма'), value: money(this.splitTotal(), M.curOf(acc)), onClick: () => push(new SplitsScreen(this)) });
+      amtCell = cell({ label: t('Сумма'), value: money(this.splitTotal(), M.curOf(acc)), onClick: () => this.openSplits() });
     } else {
       const rateBtn = multi && d.type !== 't'
-        ? h('button', { type: 'button', class: 'mini', onclick: (e) => { e.preventDefault(); push(new ExchangeScreen(this)); } },
+        ? h('button', { type: 'button', class: 'mini', onclick: (e) => { e.preventDefault(); this.flushInputs(); push(new ExchangeScreen(this)); } },
           d.fCur ? `${d.fCur} × ${fmtRate(d.fRate || 1)}` : '× 1')
         : null;
-      amtCell = amountCell(t('Сумма'), d.amount, (v) => {
+      amtCell = amountCell(t('Сумма'), d.amount, (v, prev) => {
         this.touched.amount = true;
-        if (v < 0 && d.type !== 't') { d.type = d.type === 'w' ? 'd' : 'w'; v = -v; d.amount = v; this.render(); return; }
         d.amount = Math.abs(v);
         if (d.fAmt && d.fRate) d.fAmt = Math.round(d.amount / d.fRate);
         this.syncXfer('amount', d.amount);
-      }, { right: rateBtn, onInput: (v) => { this.touched.amount = true; this.syncXfer('amount', v.trim() ? evalAmount(v) : 0); } });
+        // «−500» — меняем Расход/Доход (и обратно, если минус стёрли); поле с фокусом не трогаем
+        if (d.type !== 't' && (v < 0) !== (prev < 0)) { d.type = d.type === 'w' ? 'd' : 'w'; this.rerender(); }
+      }, { right: rateBtn, key: 'amount' });
       this.amountInputEl = amtCell.input;
     }
 
@@ -256,8 +294,7 @@ export class EditTxnScreen extends Screen {
       if (multi && to && M.curOf(to) !== M.curOf(acc)) {
         const toAmt = d.toAmount ?? M.convert(d.amount, d.acc, d.to);
         const toCell = amountCell(t('Зачислено'), toAmt, (v) => this.syncXfer('to', v), {
-          right: h('span', { class: 'muted' }, M.curOf(to)),
-          onInput: (v) => this.syncXfer('to', v.trim() ? evalAmount(v) : 0),
+          right: h('span', { class: 'muted' }, M.curOf(to)), key: 'toAmt',
         });
         this.toAmtInput = toCell.input;
         first.push(toCell);
@@ -270,10 +307,15 @@ export class EditTxnScreen extends Screen {
     if (f.num) {
       const nextBtn = acc?.chk ? h('button', { type: 'button', class: 'mini', onclick: (e) => { e.preventDefault(); d.num = String(acc.chk); this.render(); } }, t('След. №')) : null;
       const c = inputCell({ label: t('Номер'), value: d.num, placeholder: t('№ чека, Банкомат…'), onInput: (v) => (d.num = v), right: [nextBtn, h('span', { class: 'chev', onclick: (e) => { e.preventDefault(); pickFromList('ids', t('Номер'), d.num, (v) => { d.num = v; }); } })] });
+      c.input.dataset.f = 'num';
       second.push(c);
     }
     if (f.cleared) second.push(switchCell(t('Проведена'), !!d.cleared, (v) => (d.cleared = v)));
-    if (f.memo) second.push(inputCell({ label: t('Примечание'), value: d.memo, placeholder: t('Примечание'), onInput: (v) => (d.memo = v) }));
+    if (f.memo) {
+      const c = inputCell({ label: t('Примечание'), value: d.memo, placeholder: t('Примечание'), onInput: (v) => (d.memo = v) });
+      c.input.dataset.f = 'memo';
+      second.push(c);
+    }
     if (f.cls) second.push(cell({ label: t('Класс'), value: d.cls, placeholder: t('Класс'), onClick: () => pickFromList('classes', t('Класс'), d.cls, (v) => { d.cls = v; }) }));
 
     const out = [group(first)];
@@ -296,7 +338,8 @@ export class EditTxnScreen extends Screen {
 
   footer() {
     if (this.templateMode || !this.acc) return null;
-    const a = this.acc;
+    const f = this.opts.fromAcc; // открыли из журнала счёта-получателя — его балансы
+    const a = (f && f === this.d.to && M.account(f)) || this.acc;
     return balanceBar([
       { label: M.balanceLabel('cleared'), cents: M.balance(a.id, 'cleared'), cur: M.curOf(a) },
       { label: M.balanceLabel('current'), cents: M.balance(a.id, 'current'), cur: M.curOf(a) },
@@ -307,7 +350,7 @@ export class EditTxnScreen extends Screen {
     const acc = this.acc;
     return toolbar(
       this.templateMode ? null : { icon: 'dup', onClick: () => this.duplicate() },
-      this.d.type !== 't' ? { icon: 'splits', onClick: () => push(new SplitsScreen(this)) } : null,
+      this.d.type !== 't' ? { icon: 'splits', onClick: () => this.openSplits() } : null,
       acc?.fee && !this.templateMode ? { label: '+' + t('Комиссия'), onClick: () => this.addFee() } : null,
       '|',
       this.isNew && !this.templateMode ? null : { icon: 'trash', onClick: () => this.remove() },
@@ -321,14 +364,23 @@ export class EditTxnScreen extends Screen {
     return true;
   }
 
+  openSplits() { this.flushInputs(); push(new SplitsScreen(this)); }
+
   async save() {
+    if (this.saving) return; // двойной тап «Сохранить»
+    this.saving = true;
+    if (await this.store()) pop(); else this.saving = false;
+  }
+
+  // Записать операцию (общее для «Сохранить» и «Дублировать»); false — не записана
+  async store() {
     this.flushInputs();
     await new Promise((r) => setTimeout(r, 30)); // дать сработать onchange
-    if (!this.validate()) return;
+    if (!this.validate()) return false;
     const d = this.d;
     if (d.splits.length === 1) {
       const sp = d.splits[0];
-      d.category = sp.category; d.amount = Math.abs(sp.amount); d.type = sp.amount < 0 ? 'w' : 'd';
+      d.category = sp.category; d.amount = Math.abs(sp.amount); d.type = sp.amount ? (sp.amount < 0 ? 'w' : 'd') : d.type;
       if (sp.memo && !d.memo) d.memo = sp.memo;
       if (sp.cls && !d.cls) d.cls = sp.cls;
       d.splits = [];
@@ -336,50 +388,56 @@ export class EditTxnScreen extends Screen {
     if (this.templateMode) {
       M.saveRepeatTemplate(d, this.rule, this.opts.repeatId);
       haptic('ok');
-      pop();
-      return;
+      return true;
     }
     let future = false;
     const r = d.rep && M.repeat(d.rep);
     if (r && !this.isNew && !this.ruleChanged && JSON.stringify(d) !== this.origJson) {
       const i = await actionSheet({ title: t('Это повторяющаяся операция'), buttons: [{ label: t('Изменить только эту') }, { label: t('Эту и все будущие') }] });
-      if (i == null) return;
+      if (i == null) return false;
       future = i === 1;
     }
     const x = M.saveTxn(d, { silent: true });
+    d.id = x.id; d.seq = x.seq; // повторная запись — та же операция, а не копия
     if (this.ruleChanged) {
       const rr = M.applyRepeat(x, this.rule, x.rep);
       if (rr) x.rep = rr.id; else delete x.rep;
     } else if (future && r) {
-      r.tpl = M.templateOf(x);
+      M.applyToFuture(r, x);
+    }
+    for (const f of this.fees.splice(0)) {
+      M.saveTxn({
+        acc: f.acc, type: 'w', date: x.date, amount: f.amount, payee: t('Комиссия'), category: 'Банк:Комиссии',
+        cls: '', num: '', memo: x.payee ? t('за «{0}»', x.payee) : '', cleared: false, splits: [],
+      }, { silent: true });
     }
     M.postDueRepeats();
     M.commit();
     haptic('ok');
-    pop();
+    return true;
   }
 
   async duplicate() {
+    if (this.saving) return;
+    this.saving = true;
     this.flushInputs();
-    await new Promise((r) => setTimeout(r, 30));
-    if (!this.validate()) return;
+    const dirty = this.isNew || this.ruleChanged || this.fees.length || JSON.stringify(this.d) !== this.origJson;
+    if (!(dirty ? await this.store() : this.validate())) { this.saving = false; return; }
     const copy = clone(this.d);
     delete copy.id; delete copy.seq; delete copy.rep; delete copy.mod; delete copy.opening;
     copy.date = today();
     copy.cleared = false;
     copy.toCleared = false;
-    if (this.isNew || JSON.stringify(this.d) !== this.origJson) M.saveTxn(this.d);
     pop();
     setTimeout(() => push(new EditTxnScreen(copy)), 50);
     toast(t('Копия операции'));
   }
 
+  // комиссия запишется при сохранении операции (отмена — без комиссии)
   addFee() {
+    this.flushInputs();
     const acc = this.acc;
-    M.saveTxn({
-      acc: acc.id, type: 'w', date: this.d.date, amount: acc.fee, payee: t('Комиссия'), category: 'Банк:Комиссии',
-      cls: '', num: '', memo: this.d.payee ? t('за «{0}»', this.d.payee) : '', cleared: false, splits: [],
-    });
+    this.fees.push({ acc: acc.id, amount: acc.fee });
     toast(t('Добавлена комиссия {0}', money(acc.fee, M.curOf(acc))));
   }
 
@@ -456,13 +514,15 @@ export class SplitsScreen extends Screen {
   onClose() {
     const d = this.p.d;
     d.splits = d.splits.filter((s) => s.amount || s.category);
+    // при нуле знак берём из типа операции (−0 < 0 — ложь, и расход превращался в доход)
     if (d.splits.length === 1) {
       const sp = d.splits[0];
-      d.category = sp.category; d.amount = Math.abs(sp.amount); d.type = sp.amount < 0 ? 'w' : 'd';
+      d.category = sp.category; d.amount = Math.abs(sp.amount); d.type = (sp.amount || this.sign) < 0 ? 'w' : 'd';
       d.splits = [];
-    } else if (d.splits.length) d.type = this.p.splitTotal() < 0 ? 'w' : 'd';
+    } else if (d.splits.length) d.type = (this.p.splitTotal() || this.sign) < 0 ? 'w' : 'd';
     else d.amount = Math.abs(this.total);
     this.p.touched.amount = true;
+    this.p.render(); // pop() перерисовал редактор до onClose
   }
 }
 
@@ -561,6 +621,9 @@ export class RepeatScreen extends Screen {
 }
 
 // ---------- курс валюты для операции ----------
+const prec = (r) => +r.toPrecision(10); // toFixed(6) портил мелкие курсы (VND: 8928,57 → 8927,50)
+const rateStr = (r) => String(r).replace('.', M.state.settings.lang === 'ru' ? ',' : '.');
+
 export class ExchangeScreen extends Screen {
   constructor(parent) {
     super();
@@ -571,39 +634,59 @@ export class ExchangeScreen extends Screen {
     this.fCur = d.fCur || M.curOf(parent.acc);
     this.fRate = d.fRate || 1;
     this.fAmt = d.fAmt ?? d.amount;
+    this.amt = d.amount; // сумма по счёту: введённая вручную остаётся как есть
+    this.order = ['fAmt', 'fRate']; // два последних правленых поля; третье считается
   }
-  nav() { return { title: t('Курс'), left: backButton(t('Операция')), right: { label: t('Готово'), style: 'done', onClick: () => { document.activeElement?.blur(); setTimeout(() => this.apply(), 30); } } }; }
+  nav() { return { title: t('Курс'), left: backButton(t('Операция')), right: { label: t('Готово'), style: 'done', onClick: () => { document.activeElement?.blur(); this.apply(); } } }; }
   apply() {
+    if (this.applied) return; // двойной тап «Готово»
+    this.applied = true;
     const d = this.p.d;
     if (this.fCur === M.curOf(this.p.acc) && this.fRate === 1) { delete d.fCur; delete d.fRate; delete d.fAmt; }
     else { d.fCur = this.fCur; d.fRate = this.fRate; d.fAmt = this.fAmt; }
-    d.amount = Math.round(this.fAmt * this.fRate);
+    d.amount = this.amt;
     this.p.touched.amount = true;
     pop();
+  }
+  // «Любые два значения — третье посчитается»: на каждый ввод пересчитываем поле, которое правили давнее всех
+  set(k, v) {
+    this[k] = v;
+    this.order = [k, ...this.order.filter((x) => x !== k)].slice(0, 2);
+    let c = ['fAmt', 'fRate', 'amt'].find((x) => !this.order.includes(x));
+    if (c === 'fRate' && !(this.fAmt && this.amt)) {
+      if (k !== 'amt' || !this.amt) return; // курс из нуля не посчитать
+      c = 'fAmt'; // суммы в валюте нет — считаем её по курсу
+    }
+    if (c === 'amt') this.amt = Math.round(this.fAmt * this.fRate);
+    else if (c === 'fAmt') this.fAmt = Math.round(this.amt / this.fRate);
+    else this.fRate = prec(this.amt / this.fAmt);
+    if (c === 'fRate') this.rateInp.value = rateStr(this.fRate); // соседнее поле — без render(), фокус не сбиваем
+    else (c === 'amt' ? this.amtInp : this.fAmtInp).setCents(this[c]);
   }
   guessRate(code) {
     const acc = this.p.acc;
     const other = M.state.accounts.find((a) => a.currency === code);
     const homeRate = code === M.state.settings.home ? 1 : other ? M.rateOf(other) : 1;
-    return +(homeRate / M.rateOf(acc)).toFixed(6);
+    return prec(homeRate / M.rateOf(acc));
   }
   body() {
     const acc = this.p.acc;
+    const fAmt = amountCell(t('Сумма в валюте'), this.fAmt, (v) => this.set('fAmt', Math.abs(v)));
+    const rate = inputCell({
+      label: t('Курс'), value: rateStr(this.fRate), inputmode: 'decimal',
+      onInput: (v) => { const r = parseFloat(v.replace(',', '.')); if (r > 0) this.set('fRate', r); },
+      onChange: () => { this.rateInp.value = rateStr(this.fRate); },
+      right: h('button', { type: 'button', class: 'mini', onclick: (e) => { e.preventDefault(); this.set('fRate', prec(1 / this.fRate)); this.rateInp.value = rateStr(this.fRate); } }, '1/x'),
+    });
+    const amt = amountCell(t('Сумма по счёту'), this.amt, (v) => this.set('amt', Math.abs(v)), { right: h('span', { class: 'muted' }, M.curOf(acc)) });
+    this.fAmtInp = fAmt.input; this.rateInp = rate.input; this.amtInp = amt.input;
     return [
       group([
         cell({ label: t('Валюта'), value: `${this.fCur} — ${currencyName(this.fCur)}`, onClick: () => push(new PickerScreen({
           title: t('Валюта'), value: this.fCur, items: allCurrencies().map((c) => ({ value: c, label: `${c} — ${currencyName(c)}` })),
-          onPick: (v) => { this.fCur = v; this.fRate = this.guessRate(v); },
+          onPick: (v) => { this.fCur = v; this.set('fRate', this.guessRate(v)); },
         })) }),
-        amountCell(t('Сумма в валюте'), this.fAmt, (v) => { this.fAmt = Math.abs(v); this.render(); }),
-        inputCell({
-          label: t('Курс'), value: String(this.fRate).replace('.', M.state.settings.lang === 'ru' ? ',' : '.'), inputmode: 'decimal',
-          onChange: (v) => { const r = parseFloat(v.replace(',', '.')); if (r > 0) { this.fRate = r; this.render(); } },
-          right: h('button', { type: 'button', class: 'mini', onclick: (e) => { e.preventDefault(); this.fRate = +(1 / this.fRate).toFixed(6); this.render(); } }, '1/x'),
-        }),
-        amountCell(t('Сумма по счёту'), Math.round(this.fAmt * this.fRate), (v) => {
-          if (this.fAmt) { this.fRate = +(Math.abs(v) / this.fAmt).toFixed(6); this.render(); }
-        }, { right: h('span', { class: 'muted' }, M.curOf(acc)) }),
+        fAmt, rate, amt,
       ], { footer: t('Введите любые два значения — третье посчитается само.') }),
     ];
   }
