@@ -60,7 +60,7 @@ export class RegisterScreen extends Screen {
   searchBar() {
     this.searchInput = h('input', {
       class: 'search-inp', type: 'search', placeholder: t('Поиск: текст или >300, <-300, =20'), value: this.q, autocomplete: 'off',
-      oninput: (e) => { this.q = e.target.value; this.renderRows(); },
+      oninput: (e) => { this.q = e.target.value; this.renderRows(); this.footEl?.replaceWith(this.footer()); },
     });
     return h('div', { class: 'searchbar' }, this.searchInput,
       segmented([{ value: 'pending', label: t('Непроведённые') }, { value: 'cleared', label: t('Проведённые') }, { value: 'all', label: t('Все') }],
@@ -81,9 +81,10 @@ export class RegisterScreen extends Screen {
         cls: (e) => (e.t.cls || '').toLowerCase(), num: (e) => e.t.num || '', memo: (e) => (e.t.memo || '').toLowerCase(),
         cleared: (e) => (e.cleared ? 1 : 0),
       }[regSort];
+      const coll = new Intl.Collator(M.state.settings.lang, { numeric: true }); // ё после е, 99 < 100
       es = [...es].sort((a, b) => {
         const ka = key(a), kb = key(b);
-        return ka < kb ? -1 : ka > kb ? 1 : a.date < b.date ? -1 : a.date > b.date ? 1 : 0;
+        return (typeof ka === 'string' ? coll.compare(ka, kb) : ka - kb) || (a.date < b.date ? -1 : a.date > b.date ? 1 : 0);
       });
     }
     if (!regAsc) es = [...es].reverse();
@@ -169,8 +170,9 @@ export class RegisterScreen extends Screen {
       return balanceBar(balanceSlots((type) => M.balance(this.acc, type), acc), cycleBalance);
     }
     if (this.filter) {
-      const sum = (this.shown || this.entries()).reduce((a, e) => a + M.toHome(e.amt, M.account(e.acc)), 0);
-      return balanceBar([{ label: t('Итого по фильтру'), cents: sum, red: sum < 0 }]);
+      const { line } = M.makeMatcher(this.filter, this.acc); // из сплита — только подходящие строки
+      const sum = (this.shown || this.entries()).reduce((a, e) => a + M.toHome(M.linesOf(e).filter(line).reduce((s, l) => s + l.amt, 0), M.account(e.acc)), 0);
+      return (this.footEl = balanceBar([{ label: t('Итого по фильтру'), cents: sum, red: sum < 0 }]));
     }
     return balanceBar(balanceSlots((type) => M.totalBalance(type)), cycleBalance);
   }
@@ -245,8 +247,8 @@ export class RegisterScreen extends Screen {
   }
 
   async rollup() {
-    const n = this.shown.filter((e) => e.dir === 'out' && e.t.type !== 't').length;
-    if (!n) return toast(t('Нечего сворачивать (переводы не сворачиваются)'));
+    const n = this.shown.filter((e) => M.rollable(e, this.acc)).length;
+    if (!n) return toast(t('Нечего сворачивать (переводы и будущие операции не сворачиваются)'));
     const ok = await confirmBox(t('Заменить {0} показанных операций одной итоговой (разбитой по категориям)? Это нельзя отменить.', n), { ok: t('Свернуть'), destructive: true, title: t('Свёртка') });
     if (ok) { M.rollup(this.acc, this.shown); toast(t('Готово')); }
   }

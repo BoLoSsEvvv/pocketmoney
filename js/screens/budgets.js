@@ -29,9 +29,10 @@ export function rangeLabel(r) {
 
 function range(screen) {
   const bs = M.state.settings.budget;
-  if (!screen.brange || screen.brangeView !== bs.view) {
+  if (!screen.brange || screen.brangeView !== bs.view || screen.brangeStart !== bs.start) {
     screen.brange = M.periodRange(bs.view, today(), bs.start);
     screen.brangeView = bs.view;
+    screen.brangeStart = bs.start;
   }
   return screen.brange;
 }
@@ -75,7 +76,8 @@ function compute(screen) {
 }
 
 function drill(category, subcats, r) {
-  const f = { ...M.emptyFilter(), name: category, category: subcats ? category + '%' : category, dates: 'custom', from: r.start, to: r.end };
+  const f = { ...M.emptyFilter(), name: category, category, subcats, dates: 'custom', from: r.start, to: r.end };
+  if (!M.state.settings.budget.allAccounts) f.accounts = M.state.accounts.filter((a) => a.worth).map((a) => a.id); // как в budgetView
   push(new RegisterScreen({ filter: f, title: category, back: t('Бюджеты'), fixedFilter: true }));
 }
 

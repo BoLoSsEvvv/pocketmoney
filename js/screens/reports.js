@@ -11,9 +11,9 @@ const MODES = ['all', 'monthly', 'bimonthly', 'quarterly', 'halfyear', 'yearly']
 const ANCHOR = '2000-01-01';
 const byTitle = (by) => ({ category: t('Категории'), payee: t('Получатели'), class: t('Классы'), account: t('Счета') }[by]);
 
-function srcEntries(src) {
-  return src.shown || src.entries();
-}
+// всегда заново: после правок в раскрытии кэш журнала (src.shown) устаревает
+const srcEntries = (src) => src.entries();
+const srcLine = (src) => M.makeMatcher(src.filter, src.acc).line; // строки сплита, подходящие под фильтр
 
 function drillFilter(src, extra) {
   const base = src.filter ? clone(src.filter) : M.emptyFilter();
@@ -62,13 +62,13 @@ export class ReportScreen extends Screen {
   }
   groups() {
     const s = M.state.settings;
-    let groups = M.groupLines(M.reportLines(this.entries(), this.by), this.by).filter((g) => g.sum !== 0);
+    let groups = M.groupLines(M.reportLines(this.entries(), this.by, M.makeMatcher(this.src.filter, this.src.acc)), this.by).filter((g) => g.sum !== 0);
     const exp = groups.filter((g) => g.sum < 0).sort((a, b) => a.sum - b.sum);
     const inc = groups.filter((g) => g.sum > 0).sort((a, b) => b.sum - a.sum);
     exp.forEach((g, i) => (g.color = PALETTE[i % PALETTE.length]));
     inc.forEach((g, i) => (g.color = PALETTE[(i + 1) % PALETTE.length]));
     const sort = {
-      name: (a, b) => a.key.localeCompare(b.key),
+      name: (a, b) => a.key.localeCompare(b.key, s.lang),
       amount: (a, b) => Math.abs(b.sum) - Math.abs(a.sum),
       count: (a, b) => b.count - a.count,
     }[s.reportSort];
@@ -116,9 +116,9 @@ export class ReportScreen extends Screen {
     if (!g) return;
     const r = this.range;
     const extra = r ? { dates: 'custom', from: r.start, to: r.end } : {};
-    const none = g.key.startsWith('<') && g.key.endsWith('>') && this.by !== 'payee';
+    const none = g.key.startsWith('<') && g.key.endsWith('>') && (this.by !== 'payee' || g.key === t('<без получателя>'));
     if (none) return toast(t('Для этой группы нет отдельного списка'));
-    if (this.by === 'category') extra.category = M.state.settings.groupSubcats ? g.key + '%' : g.key;
+    if (this.by === 'category') Object.assign(extra, { category: g.key, subcats: !!M.state.settings.groupSubcats });
     if (this.by === 'payee') extra.payee = g.key;
     if (this.by === 'class') extra.cls = g.key;
     if (this.by === 'account') {
@@ -157,10 +157,10 @@ export class MonthlyScreen extends Screen {
   constructor({ src }) { super(); this.src = src; }
   nav() { return { title: t('По месяцам'), left: backButton(t('Журнал')) }; }
   body() {
-    const es = srcEntries(this.src);
-    const map = M.monthly(es);
+    const es = srcEntries(this.src), line = srcLine(this.src);
+    const map = M.monthly(es, null, null, line);
     const months = [...map.values()].sort((a, b) => (a.month < b.month ? 1 : -1));
-    const out = [chartBox('cashflow', () => es)];
+    const out = [chartBox('cashflow', () => es, { line })];
     if (!months.length) out.push(h('div', { class: 'empty' }, t('Нет данных')));
     let ti = 0, te = 0;
     for (const m of months) {
@@ -195,6 +195,7 @@ export class ChartScreen extends Screen {
   body() {
     const list = h('div', { style: { background: '#fff' } });
     const box = chartBox(this.kind, () => (this.src ? srcEntries(this.src) : M.allEntries()), {
+      line: this.src ? srcLine(this.src) : undefined,
       onSelect: (d, data) => {
         list.replaceChildren(...[...data].reverse().map((x) => h('div', { class: 'mrow' + (x === d ? ' sel' : ''), style: x === d ? { background: '#fff8c4' } : null },
           h('span', { class: 'mn' }, monthYear(x.month)),

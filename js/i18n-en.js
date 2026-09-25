@@ -274,7 +274,7 @@ export const EN = {
   'Неверная сумма': 'Invalid amount',
   'Добавлена корректировка {0}': 'Adjustment added: {0}',
   'Баланс уже верный': 'Balance is already correct',
-  'Нечего сворачивать (переводы не сворачиваются)': 'Nothing to roll up (transfers are not rolled up)',
+  'Нечего сворачивать (переводы и будущие операции не сворачиваются)': 'Nothing to roll up (transfers and future transactions are not rolled up)',
   'Заменить {0} показанных операций одной итоговой (разбитой по категориям)? Это нельзя отменить.': 'Replace {0} shown transactions with one summary transaction (split by category)? This cannot be undone.',
   'Свернуть': 'Roll Up',
   'Вид журнала': 'Register View',

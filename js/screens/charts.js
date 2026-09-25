@@ -139,8 +139,8 @@ export function monthsBack(n, endMonth) {
   return Array.from({ length: n }, (_, i) => addMonths(end, i - n + 1));
 }
 
-export function cashflowData(entries, months) {
-  const map = M.monthly(entries, months[0].slice(0, 7), months[months.length - 1].slice(0, 7));
+export function cashflowData(entries, months, line) {
+  const map = M.monthly(entries, months[0].slice(0, 7), months[months.length - 1].slice(0, 7), line);
   return months.map((m) => {
     const g = map.get(m.slice(0, 7)) || { income: 0, expense: 0 };
     return { month: m, up: g.income, down: g.expense, line: g.income + g.expense };
@@ -167,7 +167,7 @@ export function chartBox(kind, entries, opts = {}) {
   let data = [];
   const draw = () => {
     const months = monthsBack(12, end);
-    data = kind === 'networth' ? networthData(months) : cashflowData(entries(), months);
+    data = kind === 'networth' ? networthData(months) : cashflowData(entries(), months, opts.line);
     const d = data[sel];
     const [y] = d.month.split('-');
     titleL.textContent = `${kind === 'networth' ? t('Чистые активы') : t('Денежный поток')}: ${y} ${monthName(d.month)}`;

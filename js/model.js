@@ -293,7 +293,7 @@ export function addToLists(x) {
 }
 
 // Сохранить операцию. Возвращает сохранённую запись.
-export function saveTxn(d, { silent } = {}) {
+export function saveTxn(d, { silent, auto } = {}) {
   const x = normalize(d);
   x.mod = Date.now();
   if (!x.id) {
@@ -308,9 +308,9 @@ export function saveTxn(d, { silent } = {}) {
   // номер чека: запоминаем следующий
   if (/^\d+$/.test(x.num || '')) {
     const acc = account(x.acc);
-    if (acc && (!acc.chk || +x.num >= +acc.chk)) acc.chk = String(+x.num + 1);
+    if (acc && (!acc.chk || +x.num >= +acc.chk)) acc.chk = String(+x.num + 1).padStart(x.num.length, '0');
   }
-  state.lastDates.date = x.date;
+  if (!auto) state.lastDates.date = x.date; // автокопии повторов не в счёт
   addToLists(x);
   if (!silent) commit();
   return x;
@@ -437,7 +437,7 @@ export function postDueRepeats(until) {
       d.rep = r.id;
       d.cleared = false;
       d.toCleared = false;
-      saveTxn(d, { silent: true });
+      saveTxn(d, { silent: true, auto: true });
       posted++;
       r.next = occurrenceAfter(r, r.next);
       if (r.end && r.next && r.next > r.end) r.next = null;
@@ -453,6 +453,12 @@ export function postDueRepeats(until) {
 
 export const repeat = (id) => state.repeats.find((r) => r.id === id);
 
+// Последняя дата уже созданных копий повтора (не раньше from)
+const lastRepDate = (id, from = '') => state.txns.reduce((m, y) => (y.rep === id && y.date > m ? y.date : m), from);
+// Совпадает ли суть правила (без даты окончания)
+const ruleKey = (o) => [o.freq, o.every || 1, o.freq === 'monthly' ? o.monthMode || 'date' : '', o.freq === 'weekly' ? [...(o.days || [])].sort().join() : ''].join('|');
+const sameRule = (a, b) => ruleKey(a) === ruleKey(b);
+
 export function templateOf(x) {
   const tpl = clone(x);
   for (const k of ['id', 'seq', 'mod', 'rep', 'date', 'repeat', '_touched']) delete tpl[k];
@@ -466,13 +472,14 @@ export function applyRepeat(x, rule, existingId) {
     return null;
   }
   let r = existingId && repeat(existingId);
-  const lastPosted = state.txns.filter((y) => y.rep === existingId).reduce((m, y) => (y.date > m ? y.date : m), x.date);
+  const lastPosted = existingId ? lastRepDate(existingId, x.date) : x.date;
+  const keep = r && sameRule(r, rule); // правило то же (сменился лишь конец) — якорь не трогаем
   if (!r) {
     r = { id: uid() };
     state.repeats.push(r);
   }
   Object.assign(r, { freq: rule.freq, every: rule.every || 1, end: rule.end || null, days: rule.days || [], monthMode: rule.monthMode || 'date' });
-  r.start = x.date;
+  if (!keep) r.start = x.date;
   r.tpl = templateOf(x);
   r.next = occurrenceAfter(r, lastPosted);
   if (r.end && r.next && r.next > r.end) r.next = null;
@@ -494,14 +501,20 @@ export function saveRepeatTemplate(d, rule, id) {
     commit();
     return null;
   }
+  // правило то же и дата — одна из дат повтора: якорь (31-е, последний вт, 29 фев.) сохраняем
+  const keep = r && sameRule(r, rule) && occurrenceAfter(r, addDays(x.date, -1)) === x.date;
   if (!r) {
     r = { id: uid() };
     state.repeats.push(r);
   }
   Object.assign(r, {
     freq: rule.freq, every: rule.every || 1, end: rule.end || null, days: rule.days || [], monthMode: rule.monthMode || 'date',
-    start: x.date, next: x.date, tpl: templateOf(x),
+    tpl: templateOf(x),
   });
+  if (!keep) r.start = x.date;
+  // первая подходящая дата с x.date, но после уже созданных копий (редактор мог быть открыт до автосоздания)
+  const last = lastRepDate(r.id);
+  r.next = occurrenceAfter(r, last >= x.date ? last : addDays(x.date, -1));
   addToLists(x);
   postDueRepeats();
   commit();
@@ -619,6 +632,10 @@ export function filterAccounts(f, ctxAcc) {
   return f.accounts;
 }
 
+// Сравнение без регистра и без различия е/ё
+const fold = (s) => (s || '').toLowerCase().replace(/ё/g, 'е');
+const wild = (p) => { const m = wildcard(fold(p)); return m && ((s) => m(fold(s))); };
+
 export function makeMatcher(f, ctxAcc) {
   const accs = filterAccounts(f, ctxAcc);
   const accSet = accs ? new Set(accs) : null;
@@ -630,9 +647,12 @@ export function makeMatcher(f, ctxAcc) {
     };
   }
   const range = f.dates === 'recent' ? null : presetRange(f.dates, f.from, f.to);
-  const payee = wildcard(f.payee), num = wildcard(f.num), cat = wildcard(f.category), cls = wildcard(f.cls);
-  const memo = f.memo ? f.memo.toLowerCase() : null;
-  const line = (l) => (!cat || cat(l.category)) && (!cls || cls(l.cls)) && (!memo || (l.memo || l.e.t.memo || '').toLowerCase().includes(memo));
+  const payee = wild(f.payee), num = wild(f.num), cls = wild(f.cls);
+  // subcats: категория или её подкатегории (Дом, Дом:…), но не «Домашние животные»
+  const cat0 = wild(f.category), catSub = f.subcats && wild(f.category + ':%');
+  const cat = cat0 && ((c) => cat0(c) || (catSub && catSub(c)));
+  const memo = f.memo ? fold(f.memo) : null;
+  const line = (l) => (!cat || cat(l.category)) && (!cls || cls(l.cls)) && (!memo || fold(l.memo || l.e.t.memo).includes(memo));
   const entry = (e) => {
     if (accSet) {
       if (!accSet.has(e.acc)) return false;
@@ -666,10 +686,10 @@ export function searchMatcher(q) {
     const lo = Math.min(a, b), hi = Math.max(a, b);
     return (e) => e.amt >= lo && e.amt <= hi;
   }
-  const s = q.toLowerCase();
+  const s = fold(q);
   return (e) =>
     [payeeOf(e), e.t.category, e.t.memo, e.t.num, e.t.cls, ...(e.t.splits || []).map((x) => x.category + ' ' + (x.memo || ''))]
-      .some((v) => (v || '').toLowerCase().includes(s));
+      .some((v) => fold(v).includes(s));
 }
 
 export function saveFilter(f) {
@@ -680,12 +700,21 @@ export function saveFilter(f) {
 }
 
 // ---------- отчёты ----------
-export function reportLines(entries, by) {
+// m — матчер фильтра: m.line отбирает строки сплита, m.accSet — счета фильтра
+export function reportLines(entries, by, m) {
   const out = [];
+  const line = m?.line || (() => true);
+  const add = (e) => { for (const l of linesOf(e)) if (line(l)) out.push(l); };
+  const keys = by === 'account' && new Set(entries.map((e) => e.key));
   for (const e of entries) {
     if (e.t.opening && by !== 'account') continue;
     if (by !== 'account' && e.t.type === 't' && !e.t.category) continue;
-    for (const l of linesOf(e)) out.push(l);
+    add(e);
+    // «По счетам»: перевод учитываем и на счёте-получателе
+    if (keys && e.dir === 'out' && e.other && !keys.has(e.t.id + 'i') && (!m?.accSet || m.accSet.has(e.other))) {
+      const r = entriesOf(e.other).find((x) => x.t === e.t);
+      if (r) add(r);
+    }
   }
   return out;
 }
@@ -716,14 +745,14 @@ export function groupLines(lines, by) {
 }
 
 // Помесячная сводка: доходы/расходы
-export function monthly(entries, fromMonth, toMonth) {
+export function monthly(entries, fromMonth, toMonth, line = () => true) {
   const map = new Map();
   for (const e of entries) {
     if (e.t.opening || (e.t.type === 't' && !e.t.category)) continue;
     const m = e.date.slice(0, 7);
     if ((fromMonth && m < fromMonth) || (toMonth && m > toMonth)) continue;
     const g = map.get(m) || { month: m, income: 0, expense: 0 };
-    for (const l of linesOf(e)) {
+    for (const l of linesOf(e).filter(line)) {
       const v = toHome(l.amt, account(e.acc));
       if (v >= 0) g.income += v; else g.expense += v;
     }
@@ -764,14 +793,15 @@ export function adjustBalance(accId, target, clearedOnly) {
   });
 }
 
-// Свернуть показанные операции счёта в одну (или две: проведённые и нет)
+// Свернуть показанные операции счёта в одну (или две: проведённые и нет); будущие не трогаем
+export const rollable = (e, accId) => e.acc === accId && e.dir === 'out' && e.t.type !== 't' && e.date <= today();
 export function rollup(accId, entries) {
-  const own = entries.filter((e) => e.acc === accId && e.dir === 'out' && e.t.type !== 't');
+  const own = entries.filter((e) => rollable(e, accId));
   if (!own.length) return 0;
-  const last = own.reduce((m, e) => (e.date > m ? e.date : m), own[0].date);
   for (const cleared of [true, false]) {
     const part = own.filter((e) => e.cleared === cleared);
     if (!part.length) continue;
+    const last = part.reduce((m, e) => (e.date > m ? e.date : m), part[0].date);
     const byCat = new Map();
     for (const e of part) for (const l of linesOf(e)) byCat.set(l.category, (byCat.get(l.category) || 0) + l.amt);
     const splits = [...byCat].filter(([, v]) => v).map(([category, amount]) => ({ category, amount, memo: '', cls: '' }));
