@@ -1,5 +1,5 @@
 // Информация о счёте
-import { h, clone, amountInput, evalAmount, currencyName, allCurrencies, longDate, today } from '../util.js';
+import { h, clone, amountInput, evalAmount, evalNum, currencyName, allCurrencies, longDate, today } from '../util.js';
 import { t } from '../i18n.js';
 import * as M from '../model.js';
 import {
@@ -36,13 +36,15 @@ export class AccountInfoScreen extends Screen {
     };
   }
   async save() {
+    if (this.busy) return; // двойной тап «Сохранить»
+    this.busy = true;
     document.activeElement?.blur?.();
     await new Promise((r) => setTimeout(r, 30));
     const a = this.a;
     a.name = (a.name || '').trim();
-    if (!a.name) return toast(t('Введите название счёта'));
+    if (!a.name) { this.busy = false; return toast(t('Введите название счёта')); }
     const saved = M.saveAccount(a);
-    if (this.isNew && this.opening) {
+    if (this.isNew && this.opening && a.type !== 'online') {
       M.saveTxn({
         acc: saved.id, type: this.opening < 0 ? 'w' : 'd', date: today(),
         amount: Math.abs(this.opening), payee: t('Начальный баланс'), category: '', cls: '', num: '', memo: '', cleared: true, splits: [], opening: true,
@@ -58,7 +60,7 @@ export class AccountInfoScreen extends Screen {
     const openUrl = () => { const u = /^https?:/.test(a.url) ? a.url : 'https://' + a.url; TG?.openLink ? TG.openLink(u) : window.open(u, '_blank'); };
     const money2 = (label, key, hint) => inputCell({
       label, value: a[key] != null ? (a[key] < 0 ? '-' : '') + amountInput(a[key]) : '', placeholder: hint || '', inputmode: 'decimal',
-      onChange: (v) => { const c = evalAmount(v); a[key] = v.trim() === '' ? null : c; },
+      onInput: (v) => { const c = evalAmount(v); a[key] = v.trim() === '' ? null : c; },
     });
     const out = [
       group([
@@ -78,8 +80,8 @@ export class AccountInfoScreen extends Screen {
     if (this.isNew && a.type !== 'online') {
       out.push(group([
         inputCell({
-          label: t('Начальный баланс'), value: this.opening ? amountInput(this.opening) : '', placeholder: '0', inputmode: 'decimal',
-          onChange: (v) => { this.opening = evalAmount(v) || 0; },
+          label: t('Начальный баланс'), value: this.opening ? (this.opening < 0 ? '-' : '') + amountInput(this.opening) : '', placeholder: '0', inputmode: 'decimal',
+          onInput: (v) => { this.opening = evalAmount(v) || 0; },
         }),
       ], { footer: t('Отрицательное значение — долг (например, для кредитной карты: -15000).') }));
     }
@@ -105,7 +107,7 @@ export class AccountInfoScreen extends Screen {
         })) }),
         (a.currency || s.home) !== s.home ? inputCell({
           label: t('Курс'), value: String(a.rate || 1).replace('.', s.lang === 'ru' ? ',' : '.'), inputmode: 'decimal',
-          onChange: (v) => { const r = parseFloat(v.replace(',', '.')); if (r > 0) a.rate = r; },
+          onInput: (v) => { const r = evalNum(v); if (r > 0) a.rate = r; },
           right: h('span', { class: 'muted' }, s.home),
         }) : null,
       ], { footer: (a.currency || s.home) !== s.home ? t('Сколько {0} стоит 1 {1}.', s.home, a.currency) : null }));

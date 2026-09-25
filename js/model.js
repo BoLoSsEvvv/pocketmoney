@@ -56,11 +56,12 @@ export function defaultState() {
     v: 1, seq: 0, savedAt: 0, lastExport: 0,
     settings: defaultSettings(),
     accounts: [
-      { id: uid(), name: 'Наличные', type: 'cash', icon: '💵', worth: true, currency: 'RUB', rate: 1, order: 0 },
-      { id: uid(), name: 'Карта', type: 'checking', icon: '💳', worth: true, currency: 'RUB', rate: 1, order: 1 },
+      { id: uid(), name: t('Наличные'), type: 'cash', icon: '💵', worth: true, currency: 'RUB', rate: 1, order: 0 },
+      { id: uid(), name: t('Карта'), type: 'checking', icon: '💳', worth: true, currency: 'RUB', rate: 1, order: 1 },
     ],
     txns: [], repeats: [], budgets: [], filters: [],
-    payees: [], categories: [...DEFAULT_CATEGORIES], classes: ['Личное', 'Работа'], ids: ['Банкомат', 'Онлайн', 'СБП'],
+    payees: [], categories: DEFAULT_CATEGORIES.map((c) => t(c)).sort((a, b) => a.localeCompare(b, fmt.lang)),
+    classes: [t('Личное'), t('Работа')], ids: [t('Банкомат'), t('Онлайн'), t('СБП')],
     lastDates: {},
   };
 }
@@ -151,6 +152,11 @@ export function deleteAccount(id) {
   state.accounts = state.accounts.filter((a) => a.id !== id);
   state.txns = state.txns.filter((x) => x.acc !== id && x.to !== id);
   state.repeats = state.repeats.filter((r) => r.tpl.acc !== id && r.tpl.to !== id);
+  for (const f of state.filters) {
+    if (!Array.isArray(f.accounts)) continue;
+    f.accounts = f.accounts.filter((x) => x !== id);
+    if (!f.accounts.length) f.accounts = 'all';
+  }
   commit();
 }
 

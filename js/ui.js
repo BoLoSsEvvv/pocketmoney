@@ -28,6 +28,24 @@ export const ICONS = {
   chart: svg('<path d="M3 20h18v2H3zM5 11h3v8H5zm5-6h3v14h-3zm5 3h3v11h-3z"/>'),
 };
 
+// ---------- фокус ----------
+// На iPhone нажатие кнопки не снимает фокус с поля: снимаем сами до обработчика, чтобы 'change' успел.
+export function blurActive() {
+  const a = document.activeElement;
+  if (a && /^(INPUT|TEXTAREA)$/.test(a.tagName)) a.blur();
+}
+let keepFocus = false; // pointerdown с preventDefault (подсказки получателя) — фокус не трогаем
+let lockUntil = 0; // пока экран въезжает/уезжает, тапы игнорируются (двойной тап)
+const lockTaps = () => { lockUntil = performance.now() + 360; };
+const locked = () => performance.now() < lockUntil;
+document.addEventListener('pointerdown', (e) => { keepFocus = e.defaultPrevented; });
+document.addEventListener('click', (e) => {
+  const k = keepFocus;
+  keepFocus = false;
+  if (e.isTrusted && locked()) { e.stopPropagation(); e.preventDefault(); return; }
+  if (!k && e.target !== document.activeElement) blurActive();
+}, true);
+
 // ---------- навигация ----------
 const app = () => document.getElementById('app');
 const stack = [];
@@ -55,6 +73,7 @@ export function push(screen) {
   screen.render();
   screen.el.classList.add('enter');
   app().append(screen.el);
+  lockTaps();
   requestAnimationFrame(() => requestAnimationFrame(() => {
     screen.el.classList.remove('enter');
     prev?.el.classList.add('behind');
@@ -68,6 +87,9 @@ export function pop(n = 1) {
   if (stack.length <= 1) return;
   n = Math.min(n, stack.length - 1);
   const leaving = stack.splice(stack.length - n, n);
+  for (const s of leaving) s.el.classList.add('frozen'); // уходящий экран больше не реагирует на тапы
+  if (leaving.some((s) => s.el.contains(document.activeElement))) blurActive();
+  lockTaps();
   const cur = top();
   cur.el.classList.remove('hidden');
   cur.render();
@@ -96,6 +118,8 @@ export function refresh() {
 
 export function initBack() {
   if (backOk()) TG.BackButton.onClick(() => {
+    if (locked()) return; // двойное «Назад»
+    blurActive();
     if (closeModal()) return;
     const s = top();
     if (s?.onBack) s.onBack(); else pop();
@@ -130,7 +154,12 @@ export class Screen {
 export function barButton(spec) {
   if (!spec) return h('span', { class: 'bb-spacer' });
   const cls = ['bb', spec.style || 'plain', spec.icon && !spec.label ? 'icon' : ''].join(' ');
-  const b = h('button', { class: cls, type: 'button', onclick: (ev) => { ev.stopPropagation(); spec.onClick?.(ev); } });
+  const b = h('button', { class: cls, type: 'button', onclick: (ev) => {
+    ev.stopPropagation();
+    const sc = b.closest('.screen');
+    if (sc && sc !== top()?.el) return; // экран уже закрывается
+    spec.onClick?.(ev);
+  } });
   if (spec.icon) b.insertAdjacentHTML('beforeend', ICONS[spec.icon]);
   if (spec.label) b.append(h('span', null, spec.label));
   if (spec.disabled) b.disabled = true;
@@ -255,11 +284,12 @@ export function roundPlus(onClick) {
 }
 
 // ---------- свайп для удаления ----------
+let swipeClose = null; // закрыть открытую строку
 export function swipeToDelete(row, onDelete) {
   let x0 = null, y0 = null, open = false, dx = 0;
   const btn = h('button', { class: 'swipe-del', type: 'button', onclick: (e) => { e.stopPropagation(); onDelete(); } }, t('Удалить'));
   row.append(btn);
-  const close = () => { open = false; row.classList.remove('swiped'); };
+  const close = () => { open = false; row.classList.remove('swiped'); if (swipeClose === close) swipeClose = null; };
   row.addEventListener('touchstart', (e) => { x0 = e.touches[0].clientX; y0 = e.touches[0].clientY; dx = 0; }, { passive: true });
   row.addEventListener('touchmove', (e) => {
     if (x0 == null) return;
@@ -269,8 +299,8 @@ export function swipeToDelete(row, onDelete) {
   row.addEventListener('touchend', () => {
     if (x0 == null) return;
     if (dx < -40 && !open) {
-      document.querySelectorAll('.swiped').forEach((r) => r.classList.remove('swiped'));
-      open = true; row.classList.add('swiped'); haptic();
+      swipeClose?.();
+      open = true; row.classList.add('swiped'); swipeClose = close; haptic();
     } else if (dx > 40 && open) close();
     x0 = null;
   });
@@ -491,17 +521,19 @@ export class PickerScreen extends Screen {
     const o = this.o;
     let items = this.mode === 'linked' ? o.linked.items.map((v) => (typeof v === 'string' ? { value: v, label: v } : v)) : o.items;
     if (this.q) {
-      const q = this.q.toLowerCase();
-      items = items.filter((i) => String(i.label).toLowerCase().includes(q));
+      const fold = (x) => String(x).toLowerCase().replace(/ё/g, 'е');
+      const q = fold(this.q);
+      items = items.filter((i) => fold(i.label).includes(q));
     }
     return items;
   }
   pick(v) {
     const o = this.o;
+    if (this.busy || top() !== this) return; // двойной тап: экран уже закрывается
     if (o.multi) { o.onPick(v); this.renderList(); return; }
     haptic();
     const stay = o.onPick(v);
-    if (!stay) pop();
+    if (!stay) { this.busy = true; pop(); }
   }
   body() {
     this.listEl = h('div', { class: 'plist' });
@@ -551,9 +583,10 @@ export class PickerScreen extends Screen {
   }
   afterRender(again) {
     this.renderIndex(this.items(), this.o.index !== false && this.items().length > 20 && !this.q);
-    if (!again && this.o.value) {
+    // push() рисует экран до вставки в документ — прокручиваем к выбранному в следующем кадре
+    if (!again && this.o.value) requestAnimationFrame(() => {
       const sel = this.listEl.querySelector('.check')?.closest('.row');
-      sel?.scrollIntoView({ block: 'center' });
-    }
+      if (sel) this.scroller.scrollTop = sel.offsetTop - (this.scroller.clientHeight - sel.offsetHeight) / 2;
+    });
   }
 }

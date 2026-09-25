@@ -18,7 +18,7 @@ export function filterSummary(f) {
   if (f.payee) parts.push(f.payee);
   if (f.category) parts.push(f.category);
   if (f.cls) parts.push(f.cls);
-  if (f.num) parts.push('№ ' + f.num);
+  if (f.num) parts.push(t('№ {0}', f.num));
   if (f.cleared !== 'any') parts.push(f.cleared === 'yes' ? t('проведённые') : t('непроведённые'));
   if (f.memo) parts.push('«' + f.memo + '»');
   return parts.join(' • ') || t('все операции');

@@ -138,23 +138,38 @@ export function amountInput(cents) {
   return fmt.lang === 'ru' ? s.replace('.', ',') : s;
 }
 
-// Разбор суммы с поддержкой калькулятора: "120+35,5*2"
-export function evalAmount(str) {
+// Число с разделителями: "1 234,56", "1,234.56", "1.234.567"; мусор ("12.5.3") → null
+function numTok(tok) {
+  const seps = tok.replace(/\d/g, '');
+  if (!seps) return Number(tok);
+  let dec = seps.at(-1); // десятичный — последний разделитель…
+  // …кроме повторяющегося (1.000.000) и английского 1,000
+  if (seps.length > 1 ? seps[0] === dec : dec === ',' && fmt.lang === 'en' && /,\d{3}$/.test(tok)) dec = '';
+  const k = dec ? tok.lastIndexOf(dec) : tok.length;
+  const int = tok.slice(0, k), frac = tok.slice(k + 1);
+  const g = int.split(/[.,]/);
+  if (new Set(int.replace(/\d/g, '')).size > 1) return null;
+  if (g.length > 1 && (!/^\d{1,3}$/.test(g[0]) || g.slice(1).some((x) => x.length !== 3))) return null;
+  if (!g.join('') && !frac) return null;
+  return Number((g.join('') || '0') + '.' + (frac || '0'));
+}
+
+// Разбор выражения: "120+35,5*2" → число (или null)
+export function evalNum(str) {
   if (str == null) return null;
   const s = String(str)
     .replace(/[\s\u00a0\u202f]/g, '')
-    .replace(/,/g, '.')
     .replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-')
-    .replace(/[^\d.+\-*/()]/g, '');
+    .replace(/[^\d.,+\-*/()]/g, '');
   if (!s) return null;
   let i = 0;
   const peek = () => s[i];
   function num() {
     const st = i;
-    while (i < s.length && /[\d.]/.test(s[i])) i++;
+    while (i < s.length && /[\d.,]/.test(s[i])) i++;
     if (st === i) throw 0;
-    const v = parseFloat(s.slice(st, i));
-    if (Number.isNaN(v)) throw 0;
+    const v = numTok(s.slice(st, i));
+    if (v == null || Number.isNaN(v)) throw 0;
     return v;
   }
   function factor() {
@@ -181,11 +196,16 @@ export function evalAmount(str) {
   }
   try {
     const v = expr();
-    if (i !== s.length || !Number.isFinite(v)) return null;
-    return Math.round(v * 100);
+    return i === s.length && Number.isFinite(v) ? v : null;
   } catch {
     return null;
   }
+}
+
+// Сумма в копейках с калькулятором: "120+35,5*2"
+export function evalAmount(str) {
+  const v = evalNum(str);
+  return v == null ? null : Math.round(v * 100);
 }
 
 export function fmtRate(r) {
